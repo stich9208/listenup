@@ -250,7 +250,7 @@ public struct OpenAISummaryAdapter: SummaryProvider {
             purpose: input.purpose,
             sourceTranscriptRevisionID: input.transcript.id,
             annotationRevisionID: input.annotations?.id ?? "none",
-            promptVersion: "openai-v1",
+            promptVersion: "openai-v2",
             modelID: modelID,
             sections: SummaryPrompt.merge(decodedChunks),
             inputHash: input.inputHash

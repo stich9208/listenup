@@ -9,7 +9,9 @@ final class MarkdownExporterTests: XCTestCase {
         let exporter = MarkdownExporter()
         let text = try exporter.transcript(transcript)
         XCTAssertTrue(text.contains("[00:00:12–00:00:15]")); XCTAssertTrue(text.contains("Hello <world>"))
-        let sum = exporter.summary(summary); XCTAssertTrue(sum.contains("Decide rollout")); XCTAssertTrue(sum.contains("s1"))
+        let sum = exporter.summary(summary)
+        XCTAssertTrue(sum.contains("## 결정사항")); XCTAssertTrue(sum.contains("Decide rollout"))
+        XCTAssertFalse(sum.contains("Revision:")); XCTAssertFalse(sum.contains("근거:")); XCTAssertFalse(sum.contains("s1"))
     }
 
     func testWriteUsesSafeNameAndPreservesModifiedExport() throws {
@@ -23,13 +25,36 @@ final class MarkdownExporterTests: XCTestCase {
         XCTAssertNotEqual(second, third)
     }
 
-    func testIncompleteCoverageAndActionUncertaintyAreVisible() throws {
+    func testIncompleteCoverageAndActionDefaultsAreVisibleWithoutInternalEvidence() throws {
         let gap = Gap(startMs: 1_000, endMs: 2_000, reason: .device)
         let transcript = TranscriptRevision(id: "t", segments: [], coverage: Coverage(startMs: 0, endMs: 2_000, failedRanges: [gap]), modelID: "fixture", configurationHash: "fixture")
         let action = ActionItem(task: "Follow up", evidenceSegmentIDs: ["s1"])
         let summary = SummaryRevision(id: "s", purpose: .meeting, sourceTranscriptRevisionID: "t", annotationRevisionID: "a", promptVersion: "1", modelID: "fixture", sections: SummarySections(actionItems: [action]), inputHash: "x")
         let output = try MarkdownExporter().transcript(transcript)
-        XCTAssertTrue(output.contains("누락 구간")); XCTAssertTrue(MarkdownExporter().summary(summary).contains("미정")); XCTAssertTrue(MarkdownExporter().summary(summary).contains("s1"))
+        let summaryOutput = MarkdownExporter().summary(summary)
+        XCTAssertTrue(output.contains("누락 구간")); XCTAssertTrue(summaryOutput.contains("미정")); XCTAssertFalse(summaryOutput.contains("s1"))
+    }
+
+    func testScreenDocumentAndCopiedMarkdownShareSectionsAndContent() {
+        let sections = SummarySections(
+            overview: [SummaryItem(text: "핵심 요약", evidenceSegmentIDs: ["s1"])],
+            decisions: [SummaryItem(text: "배포하기로 결정", evidenceSegmentIDs: ["s2"])],
+            actionItems: [ActionItem(task: "배포 준비", owner: "재욱", dueOriginal: "금요일", evidenceSegmentIDs: ["s3"])],
+            openIssues: [SummaryItem(text: "권한 확인 필요", evidenceSegmentIDs: ["s4"])]
+        )
+        let revision = SummaryRevision(id: "summary", purpose: .meeting, sourceTranscriptRevisionID: "transcript", annotationRevisionID: "none", promptVersion: "test", modelID: "test", sections: sections, inputHash: "hash")
+        let exporter = MarkdownExporter()
+        let document = exporter.summaryDocument(revision, title: "정기회의")
+        let markdown = exporter.summary(revision, title: "정기회의")
+
+        XCTAssertEqual(document.sections.map(\.title), ["요약", "결정사항", "Action Items", "미결사항"])
+        for section in document.sections {
+            XCTAssertTrue(markdown.contains("## \(section.title)"))
+            for item in section.items {
+                XCTAssertTrue(markdown.contains(item.text))
+                if let detail = item.detail { XCTAssertTrue(markdown.contains(detail)) }
+            }
+        }
     }
 
     func testLongExportRetainsAllText() throws {

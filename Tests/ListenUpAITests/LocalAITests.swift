@@ -28,6 +28,11 @@ import ListenUpDomain
     do { _ = try await provider.summarize(SummaryInput(purpose: .lecture, transcript: transcript, inputHash: "h")); Issue.record("expected invalid evidence") } catch { #expect(error as? ListenUpError == .missingReference("summary evidence")) }
 }
 
+@Test func meetingSummaryAllowsSynthesizedOverview() throws {
+    let sections = SummarySections(overview: [SummaryItem(text: "회의 목적과 핵심 흐름", evidenceSegmentIDs: ["s"])])
+    try SummaryPrompt.validate(sections, schema: .meeting, allowedSegmentIDs: ["s"])
+}
+
 private final class FakeWhisperEngine: WhisperKitEngine, @unchecked Sendable {
     var lastLanguage: String?
     func transcribe(samples: [Float], language: String?) async throws -> [WhisperSegment] { lastLanguage = language; return [WhisperSegment(text: "안녕", startSeconds: 0.5, endSeconds: 1.5)] }
@@ -166,7 +171,7 @@ private final class MockModelURLProtocol: URLProtocol, @unchecked Sendable {
     #expect(decoded?.topics.isEmpty == true)
 }
 
-@Test func heldoutMeetingRejectsFabricatedActionsAndPreservesCommittedQuote() throws {
+@Test func heldoutMeetingRejectsFabricatedActionsAndKeepsConciseGroundedTask() throws {
     let segments = [
         TranscriptSegment(id: "h0", text: "수연이 다음 주 화요일까지 견적서를 보내기로 했다.", startMs: 0, endMs: 1, requestID: "r"),
         TranscriptSegment(id: "h1", text: "예산 증액은 제안만 나왔고 결정하지 않았다.", startMs: 1, endMs: 2, requestID: "r"),
@@ -176,14 +181,12 @@ private final class MockModelURLProtocol: URLProtocol, @unchecked Sendable {
     let raw = #"{"actionItems":[{"task":"견적서 작성","owner":"수연","dueOriginal":"다음 주 화요일","dueNormalized":"2023-10-12","evidenceSegmentIDs":["h0"]},{"task":"예산 증액 검토","owner":null,"dueOriginal":null,"dueNormalized":null,"evidenceSegmentIDs":["h1"]},{"task":"보안 점검","owner":null,"dueOriginal":null,"dueNormalized":null,"evidenceSegmentIDs":["h2"]},{"task":"다음 회의 날짜와 담당자 결정","owner":null,"dueOriginal":null,"dueNormalized":null,"evidenceSegmentIDs":["h3"]}]}"#
     let decoded = try SummaryPrompt.decodeAndValidate(from: raw, schema: .meeting, segments: segments)
     #expect(decoded.actionItems.count == 1)
-    #expect(decoded.actionItems[0].task == segments[0].text)
-    #expect(decoded.actionItems[0].owner == nil)
+    #expect(decoded.actionItems[0].task == "견적서 작성")
+    #expect(decoded.actionItems[0].owner == "수연")
     #expect(decoded.actionItems[0].dueOriginal == "다음 주 화요일")
     #expect(decoded.actionItems[0].dueNormalized == nil)
     #expect(decoded.actionItems[0].evidenceSegmentIDs == ["h0"])
-    #expect(decoded.uncertainties.count == 3)
-    #expect(Set(decoded.uncertainties.flatMap(\.evidenceSegmentIDs)) == Set(["h1", "h2", "h3"]))
-    #expect(decoded.uncertainties.map(\.text) == segments[1...3].map { "[확인 필요] 실행 항목 여부 확인 · 원문: \($0.text)" })
+    #expect(decoded.uncertainties.isEmpty)
 }
 
 @Test func commitmentGrammarRejectsNegationsAndAcceptsExplicitAgreement() throws {
@@ -196,7 +199,5 @@ private final class MockModelURLProtocol: URLProtocol, @unchecked Sendable {
         TranscriptSegment(id: "p0", text: "배포 전에 보안 설정을 검토하기로 했다.", startMs: 5, endMs: 6, requestID: "r")
     ]
     let decoded = try SummaryPrompt.decodeAndValidate(from: #"{"actionItems":[]}"#, schema: .meeting, segments: segments)
-    #expect(decoded.actionItems.count == 1)
-    #expect(decoded.actionItems[0].task == segments[5].text)
-    #expect(decoded.actionItems[0].evidenceSegmentIDs == ["p0"])
+    #expect(decoded.actionItems.isEmpty)
 }

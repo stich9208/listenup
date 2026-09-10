@@ -1,6 +1,7 @@
 import SwiftUI
 import ListenUpAI
 import ListenUpDomain
+import ListenUpExport
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
@@ -204,11 +205,13 @@ private struct ResultView: View {
                         .disabled(model.isBusy || model.transcript == nil || !model.hasAPIKey)
                     Spacer()
                 }
-                if !model.processingProgress.isEmpty { ProgressView(model.processingProgress) }
+                if shouldShowProcessingIndicator {
+                    ProgressView(model.processingProgress)
+                }
                 TabView {
                     transcriptEditor
                         .tabItem { Text("전체 전사") }
-                    ScrollView { Text(summaryText).frame(maxWidth: .infinity, alignment: .leading).padding() }
+                    ScrollView { summaryContent.frame(maxWidth: .infinity, alignment: .leading).padding() }
                         .tabItem { Text("요약") }
                 }
                 HStack {
@@ -216,10 +219,20 @@ private struct ResultView: View {
                     Button("전체 전사 복사") { model.copyResult(.transcript) }.disabled(model.transcript == nil)
                     Button("요약 + 전체 복사") { model.copyResult(.combined) }.disabled(model.transcript == nil)
                 }
-                exclusionEditor
             }
         }
         .padding(28)
+    }
+
+    private var shouldShowProcessingIndicator: Bool {
+        guard !model.processingProgress.isEmpty,
+              let status = model.session?.processingStatus else { return false }
+        switch status {
+        case .preparing, .transcribing, .summarizing:
+            return true
+        case .notStarted, .ready, .paused, .partial, .failed, .cancelled:
+            return false
+        }
     }
 
     private var apiPanel: some View {
@@ -298,51 +311,31 @@ private struct ResultView: View {
         }
     }
 
-    private var exclusionEditor: some View {
-        GroupBox("외부 반복 구간 · 요약에서만 제외") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    TextField("시작(초)", value: $model.exclusionStartSeconds, format: .number)
-                        .frame(width: 110)
-                    TextField("종료(초)", value: $model.exclusionEndSeconds, format: .number)
-                        .frame(width: 110)
-                    Button(model.editingExclusionID == nil ? "구간 추가" : "수정 저장") { Task { await model.saveExclusion() } }
-                        .disabled(model.isBusy || model.transcript == nil)
-                    if model.editingExclusionID != nil {
-                        Button("취소") { model.editExclusion(nil) }
+    @ViewBuilder
+    private var summaryContent: some View {
+        if let summary = model.summary {
+            let document = MarkdownExporter().summaryDocument(summary, title: model.session?.title)
+            VStack(alignment: .leading, spacing: 18) {
+                ForEach(document.sections) { section in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(section.title).font(.headline)
+                        ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(section.numbered ? "\(index + 1)." : "•")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.text).textSelection(.enabled)
+                                    if let detail = item.detail {
+                                        Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
                     }
-                    Spacer()
-                }
-                ForEach(model.summaryExclusions) { annotation in
-                    HStack {
-                        Text("\(AppModel.clock(annotation.startMs))–\(AppModel.clock(annotation.endMs ?? annotation.startMs))")
-                        Text(annotation.content).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("수정") { model.editExclusion(annotation) }.disabled(model.isBusy)
-                        Button("해제", role: .destructive) { Task { await model.removeExclusion(annotation.id) } }.disabled(model.isBusy)
-                    }
-                }
-                if model.summaryExclusions.isEmpty {
-                    Text("지정된 제외 구간이 없습니다. 원 전사와 오디오는 항상 유지됩니다.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .padding(.top, 4)
+        } else {
+            Text("전사가 끝나면 OpenAI API로 요약을 생성합니다.")
         }
-    }
-    private var summaryText: String {
-        guard let summary = model.summary else { return "전사가 끝나면 OpenAI API로 요약을 생성합니다." }
-        let sections = summary.sections
-        let items = sections.overview + sections.topics + sections.concepts + sections.examples
-            + sections.emphasizedPoints + sections.agendaItems + sections.decisions
-            + sections.openIssues + sections.disagreements + sections.uncertainties
-        var lines = items.map(\.text)
-        lines.append(contentsOf: sections.actionItems.map { item in
-            let owner = item.owner.map { " · 담당: \($0)" } ?? ""
-            let due = item.dueOriginal.map { " · 기한: \($0)" } ?? ""
-            return "할 일: \(item.task)\(owner)\(due)"
-        })
-        return lines.isEmpty ? "요약에 표시할 항목이 없습니다." : lines.joined(separator: "\n\n")
     }
 }
 

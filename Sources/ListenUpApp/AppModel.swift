@@ -575,10 +575,12 @@ final class AppModel: ObservableObject {
             }
         } catch is CancellationError {
             session = try? await store.updateSession { $0.processingStatus = .cancelled }
+            processingProgress = ""
             resultNotice = "OpenAI 처리를 취소했습니다. 저장된 원본과 완료된 결과는 그대로 유지됩니다."
         } catch {
             let failedStatus: ProcessingStatus = transcript == nil ? .failed : .partial
             session = try? await store.updateSession { $0.processingStatus = failedStatus }
+            processingProgress = ""
             resultNotice = friendlyMessage(for: error)
         }
     }
@@ -721,7 +723,10 @@ final class AppModel: ObservableObject {
             try await writeExports()
             processingProgress = transcript.coverage.isComplete ? "완료" : "부분 완료"
             resultNotice = "현재 용도, 교정본, 제외 구간으로 OpenAI 요약을 생성했습니다."
-        } catch { resultNotice = friendlyMessage(for: error) }
+        } catch {
+            processingProgress = ""
+            resultNotice = friendlyMessage(for: error)
+        }
     }
 
     func writeExports() async throws {
