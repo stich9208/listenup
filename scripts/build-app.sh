@@ -26,6 +26,7 @@ fi
 mkdir -p "${contents_dir}/MacOS" "${contents_dir}/Resources"
 cp "${products_dir}/ListenUpApp" "${contents_dir}/MacOS/ListenUpApp"
 cp "${repo_dir}/AppResources/Info.plist" "${contents_dir}/Info.plist"
+cp "${repo_dir}/AppResources/ListenUp.icns" "${contents_dir}/Resources/ListenUp.icns"
 
 codesign --force --deep --sign - "${app_dir}"
 echo "Built ${app_dir}"

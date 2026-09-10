@@ -18,9 +18,22 @@ public final class ScreenCaptureProvider: NSObject, SCStreamOutput, SCStreamDele
     private var sampleHandler: (@Sendable (CMSampleBuffer) -> Void)?
     public var onError: (@Sendable (Error) -> Void)?
     public init(configuration: SystemAudioCaptureConfiguration = .init()) { self.configuration = configuration; super.init() }
-    public func availableApplications() async throws -> [CaptureApplication] { try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true).applications.map { CaptureApplication(id: $0.bundleIdentifier, name: $0.applicationName) } }
+    public func availableApplications() async throws -> [CaptureApplication] {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let currentBundleIdentifier = Bundle.main.bundleIdentifier
+        var seen = Set<String>()
+        return content.applications
+            .compactMap { application -> CaptureApplication? in
+                let identifier = application.bundleIdentifier
+                guard !identifier.isEmpty,
+                      identifier != currentBundleIdentifier,
+                      seen.insert(identifier).inserted else { return nil }
+                return CaptureApplication(id: identifier, name: application.applicationName)
+            }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
     public func makeFilter(for application: CaptureApplication? = nil) async throws -> SCContentFilter {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else { throw ListenUpError.sourceUnavailable }
         if let requested = application {
             guard let running = content.applications.first(where: { $0.bundleIdentifier == requested.id }) else { throw ListenUpError.sourceUnavailable }

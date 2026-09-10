@@ -14,12 +14,13 @@ import ListenUpStorage
 final class AppModel: ObservableObject {
     @Published var title = ""
     @Published var purpose: SessionPurpose = .lecture
-    @Published var inputSource: InputSource = .systemAudio
+    @Published var inputSource: InputSource = .microphone
     @Published var languages = "ko"
     @Published var keywords = ""
     @Published var notes = ""
     @Published var rootDirectory: URL?
     @Published var availableApplications: [CaptureApplication] = []
+    @Published private(set) var hasAttemptedApplicationDiscovery = false
     @Published var selectedApplicationID: String?
     @Published var session: Session?
     @Published var elapsedMs: Int64 = 0
@@ -58,14 +59,13 @@ final class AppModel: ObservableObject {
     private var isRegisteringChunk = false
     private var captureFailureMessage: String?
     private var scopedRootURL: URL?
+    private var applicationDiscoveryBlockedByPermission = false
+    private let recordingIndicator = RecordingIndicatorController()
 
     init() {
         hasAPIKey = OpenAIKeychain.load()?.isEmpty == false
         apiNotice = hasAPIKey ? "OpenAI API 키가 macOS 키체인에 저장되어 있습니다." : "OpenAI API 키를 설정해 주세요."
         restoreRootDirectory()
-        Task {
-            await refreshApplications()
-        }
     }
 
     var isRecording: Bool { captureActive }
@@ -95,13 +95,32 @@ final class AppModel: ObservableObject {
     }
 
     func refreshApplications() async {
+        hasAttemptedApplicationDiscovery = true
+        guard !applicationDiscoveryBlockedByPermission else {
+            notice = "화면 및 시스템 오디오 녹음 권한 변경은 ListenUp을 완전히 종료하고 다시 열면 적용됩니다."
+            return
+        }
         do {
             let recorder = SystemAudioRecorder()
             availableApplications = try await recorder.availableApplications()
-            if selectedApplicationID == nil { selectedApplicationID = availableApplications.first?.id }
+            if selectedApplication == nil { selectedApplicationID = availableApplications.first?.id }
+            if availableApplications.isEmpty {
+                notice = "녹음할 수 있는 실행 중인 앱을 찾지 못했습니다. 대상 앱을 먼저 실행한 뒤 목록을 새로 고침해 주세요."
+            }
         } catch {
-            notice = "시스템 오디오 앱 목록을 읽을 수 없습니다: \(error.localizedDescription)"
+            availableApplications = []
+            if Self.isScreenCapturePermissionError(error) {
+                applicationDiscoveryBlockedByPermission = true
+                notice = "앱 소리를 사용하려면 시스템 설정의 ‘화면 및 시스템 오디오 녹음’에서 ListenUp을 허용한 뒤 앱을 완전히 종료하고 다시 열어 주세요."
+            } else {
+                notice = "녹음 가능한 앱 목록을 불러오지 못했습니다. ListenUp을 다시 연 뒤에도 계속되면 목록 새로 고침을 눌러 주세요. (\(error.localizedDescription))"
+            }
         }
+    }
+
+    func loadApplicationsIfNeeded() async {
+        guard !hasAttemptedApplicationDiscovery, availableApplications.isEmpty else { return }
+        await refreshApplications()
     }
 
     func startRecording() async {
@@ -173,6 +192,7 @@ final class AppModel: ObservableObject {
             recordingBeganAt = Date()
             elapsedMs = 0
             startTimer()
+            recordingIndicator.show()
             notice = "녹음 중입니다. 녹음을 끝낸 뒤 OpenAI API로 전사와 요약을 진행할 수 있습니다."
         } catch {
             microphone?.stop()
@@ -180,6 +200,7 @@ final class AppModel: ObservableObject {
             try? await systemAudio?.stop()
             systemAudio = nil
             captureActive = false
+            recordingIndicator.hide()
             newSession.captureStatus = .interrupted
             session = newSession
             notice = "녹음을 시작하지 못했습니다: \(error.localizedDescription)"
@@ -191,6 +212,7 @@ final class AppModel: ObservableObject {
         guard captureActive, !isBusy else { return }
         isBusy = true
         captureActive = false
+        recordingIndicator.hide()
         timer?.invalidate()
         timer = nil
         microphone?.stop()
@@ -899,6 +921,7 @@ final class AppModel: ObservableObject {
         }
         guard captureActive else { return }
         captureActive = false
+        recordingIndicator.hide()
         timer?.invalidate()
         timer = nil
         microphone?.stop()
@@ -1025,6 +1048,17 @@ final class AppModel: ObservableObject {
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "ListenUpRootBookmark")
         }
+    }
+
+    private static func isScreenCapturePermissionError(_ error: Error) -> Bool {
+        let value = error as NSError
+        let details = "\(value.domain) \(value.localizedDescription)".lowercased()
+        return details.contains("tcc")
+            || details.contains("permission")
+            || details.contains("denied")
+            || details.contains("declined")
+            || details.contains("거절")
+            || details.contains("권한")
     }
 
     static func clock(_ milliseconds: Int64) -> String {
