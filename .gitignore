@@ -4,6 +4,7 @@
 .swiftpm/
 DerivedData/
 dist/
+release/
 .env
 .env.*
 !.env.example

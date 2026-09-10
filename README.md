@@ -46,3 +46,11 @@ swift test
 마이크와 시스템 오디오는 macOS 권한이 필요합니다. 시스템 오디오는 선택한 앱 단위이며 브라우저 탭 하나만 분리한다고 보장하지 않습니다.
 
 현재 API 전환 설계와 검증 항목은 [OpenAI API 전환 문서](docs/OPENAI_API_MIGRATION.md)에 있습니다. 기존 로컬 모델 평가 문서는 결정 기록으로 보존합니다.
+
+첫 베타는 Apple Developer Program 없이 미서명 DMG로 배포합니다. 패키징과 향후 서명·공증 전환 계획은 [배포 설계 문서](docs/DISTRIBUTION_PLAN.md), 사용자 설치 과정은 [미서명 베타 설치 안내](docs/UNSIGNED_INSTALL.md)에 있습니다.
+
+미서명 베타 DMG는 다음 명령으로 생성합니다.
+
+```sh
+./scripts/package-unsigned-dmg.sh
+```
