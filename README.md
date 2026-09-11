@@ -21,7 +21,7 @@ ListenUp은 Mac에서 강의와 회의를 녹음하고, OpenAI API로 전체 전
 
 ## 설치 및 실행
 
-GitHub Releases에서 DMG를 내려받아 `ListenUp.app`을 `Applications` 폴더로 옮깁니다.
+GitHub Releases의 Assets에서 `ListenUp-0.2.0-arm64-unsigned.dmg`를 내려받아 엽니다. 그런 다음 `ListenUp.app`을 `Applications` 폴더로 옮깁니다. 함께 제공되는 `ListenUp-0.2.0-arm64-unsigned.dmg.sha256` 파일은 다운로드한 DMG의 무결성을 확인할 때 선택적으로 사용합니다.
 
 현재 베타는 Apple의 서명과 공증을 받지 않았습니다. 최초 실행이 차단되면 **시스템 설정 → 개인정보 보호 및 보안 → 확인 없이 열기**를 선택합니다. 자세한 과정은 [베타 설치 안내](docs/UNSIGNED_INSTALL.md)를 참고하세요.
 
