@@ -481,6 +481,12 @@ private struct ResultView: View {
             }
             .disabled(model.isBusy || model.transcript == nil || !model.hasAPIKey)
 
+            Button("결과물 내보내기", systemImage: "square.and.arrow.up") {
+                Task { await model.exportResultBundle() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.isBusy || model.captureActive || model.transcript == nil || model.summary == nil || session.tracks.isEmpty)
+
             Spacer()
         }
     }

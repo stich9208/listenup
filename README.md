@@ -1,45 +1,50 @@
+<p align="center">
+  <img src="AppResources/ListenUpIcon.png" width="128" alt="ListenUp 앱 로고">
+</p>
+
 # ListenUp
 
-ListenUp은 Mac에서 강의와 회의를 녹음하고, OpenAI API로 전체 전사와 요약을 만드는 앱입니다. 결과는 Markdown으로 복사하거나 사용자가 선택한 로컬 폴더에 저장할 수 있습니다.
+Mac에서 강의와 회의를 녹음하고 OpenAI API로 전사·요약하는 앱입니다.
 
 ## 주요 기능
 
-- 마이크, 선택한 앱의 소리 또는 두 소리를 함께 녹음
-- 녹음 중 이전 구간 다시 듣기
-- 기존 오디오 파일 가져오기
-- OpenAI API를 이용한 한국어 전사
-- 회의와 강의에 맞춘 서로 다른 요약 형식
-- 전체 전사, 요약, 합본 Markdown 복사 및 저장
-- 녹음 중 다른 창에서도 보이는 간단한 상태 표시
-- 세션별 오디오와 결과를 사용자가 선택한 로컬 폴더에 저장
+- 마이크와 선택한 앱의 소리를 함께 또는 따로 녹음
+- 녹음 중 이전 구간 다시 듣기 및 기존 오디오 가져오기
+- 회의·강의에 맞춘 한국어 전사와 요약
+- 전사와 요약을 Markdown으로 복사·저장
+- 필요한 경우에만 결과물을 ZIP으로 내보내기
 
-## 사용 환경
+## 요구 사항
 
 - Apple Silicon Mac
 - macOS 15 이상
 - OpenAI API 키
 
-## 설치 및 실행
+## 설치
 
-GitHub Releases의 Assets에서 `ListenUp-0.2.0-arm64-unsigned.dmg`를 내려받아 엽니다. 그런 다음 `ListenUp.app`을 `Applications` 폴더로 옮깁니다. 함께 제공되는 `ListenUp-0.2.0-arm64-unsigned.dmg.sha256` 파일은 다운로드한 DMG의 무결성을 확인할 때 선택적으로 사용합니다.
+[GitHub Releases](https://github.com/stich9208/listenup/releases)의 Assets에서 `ListenUp-0.2.0-arm64-unsigned.dmg`를 내려받아 `ListenUp.app`을 Applications 폴더로 옮깁니다.
 
-현재 베타는 Apple의 서명과 공증을 받지 않았습니다. 최초 실행이 차단되면 **시스템 설정 → 개인정보 보호 및 보안 → 확인 없이 열기**를 선택합니다. 자세한 과정은 [베타 설치 안내](docs/UNSIGNED_INSTALL.md)를 참고하세요.
+현재 베타는 서명·공증되지 않았습니다. 처음 실행이 차단되면 **시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기**를 선택하세요. 자세한 내용은 [베타 설치 안내](docs/UNSIGNED_INSTALL.md)를 참고하세요.
 
-소스에서 직접 실행하려면 다음 명령을 사용합니다.
+## 사용 방법
+
+1. 설정에서 OpenAI API 키와 결과 저장 폴더를 지정합니다.
+2. 녹음 제목·용도·대상을 선택하고 녹음을 시작합니다.
+3. 녹음을 마친 뒤 OpenAI 처리를 실행합니다.
+4. 전사와 요약을 확인하거나 **결과물 내보내기**를 선택합니다.
+
+내보낸 ZIP에는 다음 두 파일만 포함됩니다.
+
+- `recording.m4a`
+- `transcript-summary.html` — 오디오 재생, 요약, 전체 전사
+
+세션 정보, 내부 JSON, 로그, API 요청·응답 및 API 키는 결과물에 포함되지 않습니다.
+
+## 소스에서 실행
 
 ```sh
 ./scripts/build-app.sh Release
 open dist/ListenUp.app
 ```
 
-## 사용 방법
-
-1. 설정에서 OpenAI API 키를 입력하고 연결을 확인합니다.
-2. 녹음과 결과를 보관할 로컬 폴더를 선택합니다.
-3. 새 녹음에서 제목과 용도를 입력합니다.
-4. 마이크, 앱 소리 또는 마이크와 앱 소리를 녹음 대상으로 선택합니다.
-5. 필요한 경우 소리를 녹음할 앱을 선택하고 녹음을 시작합니다.
-6. 녹음을 마친 뒤 현재 결과에서 OpenAI 처리를 시작합니다.
-7. 완성된 전사와 요약을 복사하거나 세션 폴더에서 Markdown 파일을 엽니다.
-
-OpenAI API 키는 macOS 키체인에 저장됩니다. 녹음 파일과 결과는 선택한 로컬 폴더에 보관되며, 전사할 오디오와 요약할 텍스트만 처리 과정에서 OpenAI API로 전송됩니다.
+OpenAI API 키는 macOS 키체인에 저장됩니다. 전사할 오디오와 요약할 텍스트만 OpenAI API로 전송됩니다.

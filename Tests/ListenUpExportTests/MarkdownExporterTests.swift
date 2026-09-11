@@ -9,6 +9,7 @@ final class MarkdownExporterTests: XCTestCase {
         let exporter = MarkdownExporter()
         let text = try exporter.transcript(transcript)
         XCTAssertTrue(text.contains("[00:00:12–00:00:15]")); XCTAssertTrue(text.contains("Hello <world>"))
+        XCTAssertFalse(text.contains("Revision:"))
         let sum = exporter.summary(summary)
         XCTAssertTrue(sum.contains("## 결정사항")); XCTAssertTrue(sum.contains("Decide rollout"))
         XCTAssertFalse(sum.contains("Revision:")); XCTAssertFalse(sum.contains("근거:")); XCTAssertFalse(sum.contains("s1"))
@@ -19,7 +20,7 @@ final class MarkdownExporterTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let exporter = MarkdownExporter(); let first = try exporter.write("one", to: directory, filename: "../meeting:notes")
         XCTAssertTrue(first.lastPathComponent.contains("meeting_notes")); let second = try exporter.write("two", to: directory, filename: "../meeting:notes")
-        XCTAssertNotEqual(first, second); XCTAssertEqual(try String(contentsOf: first), "one")
+        XCTAssertNotEqual(first, second); XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "one")
         XCTAssertTrue(second.lastPathComponent.contains("conflict"))
         let third = try exporter.write("three", to: directory, filename: "../meeting:notes")
         XCTAssertNotEqual(second, third)

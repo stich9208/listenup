@@ -615,6 +615,44 @@ final class AppModel: ObservableObject {
         } catch { notice = "복사하지 못했습니다: \(error.localizedDescription)" }
     }
 
+    func exportResultBundle() async {
+        guard !captureActive, !isBusy,
+              let store, let session, let transcript, let summary,
+              !session.tracks.isEmpty
+        else {
+            resultNotice = "녹음, 전사, 요약이 모두 준비된 뒤 결과물을 내보낼 수 있습니다."
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "ListenUp 결과물 내보내기"
+        panel.prompt = "내보내기"
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [.zip]
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(MarkdownExporter.safeFilename(session.title))-ListenUp.zip"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        isBusy = true
+        processingProgress = "결과물 M4A 생성 중"
+        defer { isBusy = false }
+        do {
+            let sessionDirectory = await store.sessionDirectory
+            try await ResultBundleExporter().export(
+                session: session,
+                transcript: transcript,
+                summary: summary,
+                sessionDirectory: sessionDirectory,
+                destination: destination
+            )
+            processingProgress = "완료"
+            resultNotice = "녹음 M4A와 요약·전체 전사가 담긴 HTML을 내보냈습니다."
+        } catch {
+            processingProgress = ""
+            resultNotice = "결과물을 내보내지 못했습니다: \(error.localizedDescription)"
+        }
+    }
+
     func saveTranscriptCorrection() async {
         guard !captureActive, !isBusy, let store, let prior = transcript else { return }
         let lines = transcriptDraft.components(separatedBy: .newlines)

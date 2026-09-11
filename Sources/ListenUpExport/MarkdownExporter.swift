@@ -46,7 +46,6 @@ public struct MarkdownExporter: Sendable {
     public func transcript(_ revision: TranscriptRevision, title: String? = nil) throws -> String {
         try DomainValidator.validate(revision)
         var out = "# \(title ?? "Transcript")\n\n"
-        out += "Revision: `\(revision.id)`\n\n"
         for segment in revision.segments.sorted(by: { $0.startMs < $1.startMs }) {
             out += "### [\(Self.timestamp(segment.startMs))–\(Self.timestamp(segment.endMs))]\n\n\(segment.text.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
         }

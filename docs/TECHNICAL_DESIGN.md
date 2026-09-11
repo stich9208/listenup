@@ -129,7 +129,7 @@ P1에서 트랙별 전사를 선택하면 출처는 구별할 수 있지만 두 
     session.json
     journal.jsonl
     audio/
-      system/000001.caf
+      system/000001.m4a
       microphone/000001.caf
       imported/original.m4a       # 파일 가져오기 세션에만 존재
     processing/
@@ -150,6 +150,8 @@ P1에서 트랙별 전사를 선택하면 출처는 구별할 수 있지만 두 
       combined.md
     notes.md
 ```
+
+세션 폴더는 복구와 재처리를 위한 내부 저장소다. 사용자가 명시적으로 **결과물 내보내기**를 선택하면 별도 ZIP을 만들며, ZIP에는 모든 녹음 트랙과 조각을 합쳐 AAC로 인코딩한 `recording.m4a`와 자체 포함형 `transcript-summary.html`만 넣는다. HTML은 같은 폴더의 M4A를 재생하고 요약과 전체 전사를 한 화면에 표시한다. `session.json`, journal, revisions, processing 파일, 로그와 키는 복사하지 않는다.
 
 파일명은 경로 구분자·제어 문자 제거, 길이 제한, UUID 접미사로 충돌을 방지한다. 내부 참조는 상대 경로만 사용하며 `../` 및 세션 밖 symlink 탈출을 거부한다. 제목 변경은 manifest의 제목을 바꾸고 저장 중 디렉터리를 자동 이동하지 않는다.
 
