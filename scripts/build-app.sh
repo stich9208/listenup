@@ -28,5 +28,7 @@ cp "${products_dir}/ListenUpApp" "${contents_dir}/MacOS/ListenUpApp"
 cp "${repo_dir}/AppResources/Info.plist" "${contents_dir}/Info.plist"
 cp "${repo_dir}/AppResources/ListenUp.icns" "${contents_dir}/Resources/ListenUp.icns"
 
-codesign --force --deep --sign - "${app_dir}"
+codesign --force --deep --sign - \
+    --requirements "${repo_dir}/AppResources/ListenUp.requirements" \
+    "${app_dir}"
 echo "Built ${app_dir}"

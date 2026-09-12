@@ -86,6 +86,13 @@ SHA-256 파일은 사용자가 받은 DMG가 GitHub Release에 올린 원본과 
 
 첫 배포는 prerelease로 만든다.
 
+현재 저장소의 `.github/workflows/release.yml`이 다음을 자동화한다.
+
+- `main` push 또는 수동 실행: `swift test` → arm64 DMG 생성 → `latest` prerelease의 DMG와 SHA-256 갱신
+- `v*` 태그 push: 해당 태그의 별도 Release 생성
+
+GitHub 저장소의 Actions 권한에서 workflow가 contents에 대해 읽기·쓰기를 할 수 있어야 한다. `latest`는 매번 같은 Release와 태그를 갱신하는 롤링 베타이고, `v*` Release는 고정 배포본이다.
+
 1. 배포할 커밋에서 전체 테스트를 실행한다.
 2. Info.plist 버전과 Release 버전을 맞춘다.
 3. 미서명 DMG 생성 스크립트를 실행한다.
@@ -135,7 +142,7 @@ SHA-256 파일은 사용자가 받은 DMG가 GitHub Release에 올린 원본과 
 - 기존 Keychain API 키 접근 확인
 - 마이크 및 화면 기록 권한이 유지되는지 확인
 
-ad-hoc 서명은 빌드마다 코드 정체성이 달라질 수 있으므로 업데이트 후 macOS가 일부 권한을 다시 요청할 가능성이 있다. 이 항목은 미서명 베타의 알려진 제약으로 Release에 표시한다.
+빌드 스크립트는 ad-hoc 서명을 유지하되 `AppResources/ListenUp.requirements`로 Bundle ID 기반 designated requirement를 고정한다. 따라서 새 빌드마다 실행 파일의 cdhash가 바뀌어도 화면 및 시스템 오디오 녹음 권한의 코드 정체성은 유지된다. 기존 베타 설치본에 이전 cdhash로 권한이 저장되어 있으면 최초 1회 권한을 껐다가 다시 켜야 한다.
 
 ## 8. 앱 제거와 API 키
 

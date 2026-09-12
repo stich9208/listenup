@@ -1,0 +1,3 @@
+// Keep the privacy identity stable across ad-hoc release rebuilds.
+// This is intentionally limited to the app's fixed bundle identifier.
+designated => identifier "app.listenup.local"
