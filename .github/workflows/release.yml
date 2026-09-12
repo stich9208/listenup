@@ -41,7 +41,7 @@ jobs:
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AppResources/Info.plist)"
           dmg="release/ListenUp-${version}-arm64-unsigned.dmg"
           checksum="${dmg}.sha256"
-          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/latest" --jq '.id' 2>/dev/null || true)"
+          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/latest" 2>/dev/null | jq -r '.id // empty' || true)"
 
           if [[ -z "${release_id}" ]]; then
             release_id="$(gh api --method POST \
