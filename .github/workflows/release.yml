@@ -44,21 +44,14 @@ jobs:
           release_id="$(gh api "repos/${REPOSITORY}/releases/tags/latest" --jq '.id' 2>/dev/null || true)"
 
           if [[ -z "${release_id}" ]]; then
-            if gh api "repos/${REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
-              gh release create latest \
-                --verify-tag \
-                --title "ListenUp latest" \
-                --notes "자동 생성된 최신 베타입니다. main 브랜치의 최신 커밋에서 빌드되었습니다." \
-                --prerelease \
-                "${dmg}" "${checksum}"
-            else
-              gh release create latest \
-                --target "${COMMIT_SHA}" \
-                --title "ListenUp latest" \
-                --notes "자동 생성된 최신 베타입니다. main 브랜치의 최신 커밋에서 빌드되었습니다." \
-                --prerelease \
-                "${dmg}" "${checksum}"
-            fi
+            release_id="$(gh api --method POST \
+              "repos/${REPOSITORY}/releases" \
+              -f tag_name='latest' \
+              -f target_commitish="${COMMIT_SHA}" \
+              -f name='ListenUp latest' \
+              -f body='자동 생성된 최신 베타입니다. main 브랜치의 최신 커밋에서 빌드되었습니다.' \
+              -F prerelease=true \
+              --jq '.id')"
           else
             if gh api "repos/${REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
               gh api --method PATCH \
