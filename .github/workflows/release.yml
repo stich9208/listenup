@@ -41,32 +41,47 @@ jobs:
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AppResources/Info.plist)"
           dmg="release/ListenUp-${version}-arm64-unsigned.dmg"
           checksum="${dmg}.sha256"
-          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/latest" 2>/dev/null | jq -r '.id // empty' || true)"
+          previous_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/latest" 2>/dev/null | jq -r '.object.sha // empty' || true)"
+          if [[ -n "${previous_sha}" && "${previous_sha}" == "${COMMIT_SHA}" ]]; then
+            changes='- 변경사항 없음 (동일 커밋 재배포)'
+          elif [[ -n "${previous_sha}" ]]; then
+            changes="$(gh api "repos/${REPOSITORY}/compare/${previous_sha}...${COMMIT_SHA}" \
+              --jq '[.commits[] | .commit.message | split("\n")[0]] | .[0:8] | map("- " + .) | join("\n")' \
+              2>/dev/null || true)"
+          else
+            changes="$(gh api "repos/${REPOSITORY}/commits/${COMMIT_SHA}" \
+              --jq '"- " + (.commit.message | split("\\n")[0])' \
+              2>/dev/null || true)"
+          fi
+          [[ -n "${changes}" ]] || changes='- 변경사항을 확인할 수 없습니다.'
+          body=$'이번 배포 핵심 변경사항:\n\n'"${changes}"
 
+          if gh api "repos/${REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
+            gh api --method PATCH \
+              "repos/${REPOSITORY}/git/refs/tags/latest" \
+              -f sha="${COMMIT_SHA}" \
+              -F force=true
+          else
+            gh api --method POST \
+              "repos/${REPOSITORY}/git/refs" \
+              -f ref='refs/tags/latest' \
+              -f sha="${COMMIT_SHA}"
+          fi
+
+          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/latest" 2>/dev/null | jq -r '.id // empty' || true)"
           if [[ -z "${release_id}" ]]; then
-            release_id="$(gh api --method POST \
+            gh api --method POST \
               "repos/${REPOSITORY}/releases" \
               -f tag_name='latest' \
               -f target_commitish="${COMMIT_SHA}" \
               -f name='ListenUp latest' \
-              -f body='자동 생성된 최신 베타입니다. main 브랜치의 최신 커밋에서 빌드되었습니다.' \
-              -F prerelease=true \
-              --jq '.id')"
+              -f body="${body}" \
+              -F prerelease=true >/dev/null
           else
-            if gh api "repos/${REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
-              gh api --method PATCH \
-                "repos/${REPOSITORY}/git/refs/tags/latest" \
-                -f sha="${COMMIT_SHA}" \
-                -F force=true
-            else
-              gh api --method POST \
-                "repos/${REPOSITORY}/git/refs" \
-                -f ref='refs/tags/latest' \
-                -f sha="${COMMIT_SHA}"
-            fi
             gh api --method PATCH \
               "repos/${REPOSITORY}/releases/${release_id}" \
               -f target_commitish="${COMMIT_SHA}" \
+              -f body="${body}" \
               -f prerelease=true
           fi
           while IFS= read -r asset; do
