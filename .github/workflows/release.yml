@@ -51,10 +51,17 @@ jobs:
               --prerelease \
               "${dmg}" "${checksum}"
           else
-            gh api --method PATCH \
-              "repos/${REPOSITORY}/git/refs/tags/latest" \
-              -f sha="${COMMIT_SHA}" \
-              -F force=true
+            if gh api "repos/${REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
+              gh api --method PATCH \
+                "repos/${REPOSITORY}/git/refs/tags/latest" \
+                -f sha="${COMMIT_SHA}" \
+                -F force=true
+            else
+              gh api --method POST \
+                "repos/${REPOSITORY}/git/refs" \
+                -f ref='refs/tags/latest' \
+                -f sha="${COMMIT_SHA}"
+            fi
             gh api --method PATCH \
               "repos/${REPOSITORY}/releases/${release_id}" \
               -f target_commitish="${COMMIT_SHA}" \
