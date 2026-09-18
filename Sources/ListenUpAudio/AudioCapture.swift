@@ -16,6 +16,7 @@ public final class MicrophoneCapture: @unchecked Sendable {
     public private(set) var isRunning = false
     public var onFinalizedChunk: (@Sendable (URL) -> Void)?
     public var onFinalizedTimedChunk: (@Sendable (URL, Int64) -> Void)?
+    public var onLevel: (@Sendable (Float) -> Void)?
     public var onError: (@Sendable (Error) -> Void)?
     public init() {}
     public func start(directory: URL) throws {
@@ -45,9 +46,11 @@ public final class MicrophoneCapture: @unchecked Sendable {
         guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0); engine.stop(); isRunning = false
         queue.sync { finalizeCurrentChunk() }
+        onLevel?(0)
     }
     private func consume(_ buffer: AVAudioPCMBuffer, directory: URL, format: AVAudioFormat) {
         do {
+            onLevel?(AudioLevelMetering.normalizedLevel(in: buffer))
             try file?.write(from: buffer)
             framesInChunk += AVAudioFramePosition(buffer.frameLength)
             if Double(framesInChunk) / format.sampleRate >= chunkDurationSeconds {

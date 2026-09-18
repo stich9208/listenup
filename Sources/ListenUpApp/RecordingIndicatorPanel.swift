@@ -12,7 +12,7 @@ final class RecordingIndicatorController {
             return
         }
 
-        let size = NSSize(width: 106, height: 38)
+        let size = NSSize(width: 58, height: 58)
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -27,7 +27,7 @@ final class RecordingIndicatorController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
         panel.animationBehavior = .utilityWindow
 
         position(panel)
@@ -53,21 +53,44 @@ final class RecordingIndicatorController {
 }
 
 private struct RecordingIndicatorView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
     var body: some View {
-        HStack(spacing: 8) {
+        ZStack {
+            Circle()
+                .stroke(.red.opacity(pulse ? 0.08 : 0.55), lineWidth: 3)
+                .scaleEffect(pulse ? 1.08 : 0.78)
+
+            Circle()
+                .fill(.ultraThickMaterial)
+                .padding(5)
+
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 36, height: 36)
+
             Circle()
                 .fill(.red)
-                .frame(width: 9, height: 9)
-
-            Text("녹음 중")
-                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 11, height: 11)
+                .overlay(Circle().stroke(.white, lineWidth: 2))
+                .offset(x: 17, y: 17)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 38)
-        .background(.ultraThickMaterial, in: Capsule())
-        .overlay {
-            Capsule()
-                .stroke(.primary.opacity(0.12), lineWidth: 1)
+        .frame(width: 58, height: 58)
+        .contentShape(Circle())
+        .onTapGesture {
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeOut(duration: 1.25).repeatForever(autoreverses: false)) {
+                pulse = true
+            }
+        }
+        .help("ListenUp 녹음 중")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("ListenUp 녹음 중")
+        .accessibilityHint("클릭하면 ListenUp으로 돌아갑니다")
     }
 }

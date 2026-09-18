@@ -39,7 +39,7 @@ public actor SessionStore {
         self.sessionDirectory = (sessionDirectory ?? rootDirectory).standardizedFileURL
         self.encoder = Self.makeEncoder(); self.decoder = Self.makeDecoder()
         try FileManager.default.createDirectory(at: self.sessionDirectory, withIntermediateDirectories: true)
-        for name in ["audio", "processing", "revisions", "exports"] { try FileManager.default.createDirectory(at: self.sessionDirectory.appendingPathComponent(name), withIntermediateDirectories: true) }
+        for name in ["audio", "processing", "revisions"] { try FileManager.default.createDirectory(at: self.sessionDirectory.appendingPathComponent(name), withIntermediateDirectories: true) }
     }
 
     public static func create(in root: URL, session: Session) throws -> SessionStore {
@@ -54,11 +54,10 @@ public actor SessionStore {
     }
 
     public static func reopen(_ directory: URL) throws -> SessionStore {
-        let store = try SessionStore(rootDirectory: directory.deletingLastPathComponent(), sessionDirectory: directory)
         let decoder = Self.makeDecoder()
         let session = try decoder.decode(Session.self, from: Data(contentsOf: directory.appendingPathComponent("session.json")))
         try DomainValidator.validate(session)
-        return store
+        return try SessionStore(rootDirectory: directory.deletingLastPathComponent(), sessionDirectory: directory)
     }
 
     public func readSession() throws -> Session { try readSessionSync() }

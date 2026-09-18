@@ -6,7 +6,7 @@ public struct ResultBundleExporter {
     public init() {}
 
     /// Creates a user-facing ZIP containing exactly one M4A recording and one
-    /// self-contained HTML result. Session manifests, revisions, request data,
+    /// standalone, selectable-text HTML result. Session manifests, revisions, request data,
     /// logs, and other internal files are intentionally excluded.
     public func export(
         session: Session,

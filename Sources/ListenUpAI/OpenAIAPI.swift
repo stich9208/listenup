@@ -236,23 +236,64 @@ public struct OpenAISummaryAdapter: SummaryProvider {
 
     public func summarize(_ input: SummaryInput) async throws -> SummaryRevision {
         let schema: SummarySchema = input.purpose == .meeting ? .meeting : .lecture
+        let chunks = SummaryPrompt.segmentChunks(input: input)
+        func generateValidated(prompt: String, segments: [TranscriptSegment], maxOutputTokens: Int) async throws -> SummarySections {
+            let raw = try await client.generateText(prompt: prompt, model: modelID, maxOutputTokens: maxOutputTokens)
+            do {
+                return try SummaryPrompt.decodeAndValidate(from: raw, schema: schema, segments: segments)
+            } catch {
+                try Task.checkCancellation()
+                let repairPrompt = prompt + """
+
+                중요: 직전 응답은 JSON 형식 검증에 실패했습니다. 설명문이나 코드 펜스를 붙이지 말고, 지정된 키와 객체 형식을 지킨 완전한 JSON 객체 하나만 다시 반환하세요. 출력 한도에 맞추기 위해 중복 표현은 줄이되 챕터는 빠뜨리지 마세요.
+                """
+                let repaired = try await client.generateText(
+                    prompt: repairPrompt,
+                    model: modelID,
+                    maxOutputTokens: maxOutputTokens + 800
+                )
+                return try SummaryPrompt.decodeAndValidate(from: repaired, schema: schema, segments: segments)
+            }
+        }
         var decodedChunks: [SummarySections] = []
-        for chunk in SummaryPrompt.segmentChunks(input: input) {
+        for chunk in chunks {
             try Task.checkCancellation()
-            let raw = try await client.generateText(
+            let decoded = try await generateValidated(
                 prompt: SummaryPrompt.make(input: input, schema: schema, segments: chunk),
-                model: modelID
+                segments: chunk,
+                maxOutputTokens: schema == .lecture ? 4_500 : 2_800
             )
-            decodedChunks.append(try SummaryPrompt.decodeAndValidate(from: raw, schema: schema, segments: chunk))
+            decodedChunks.append(decoded)
+        }
+        let sections: SummarySections
+        if schema == .lecture, decodedChunks.count > 1 {
+            do {
+                try Task.checkCancellation()
+                let consolidated = try await generateValidated(
+                    prompt: SummaryPrompt.makeLectureConsolidation(chunks: decodedChunks),
+                    segments: chunks.flatMap { $0 },
+                    maxOutputTokens: 6_500
+                )
+                let candidate = SummaryPrompt.merge([consolidated], schema: .lecture)
+                sections = SummaryPrompt.lectureConsolidationHasAdequateCoverage(candidate, chunks: decodedChunks)
+                    ? candidate
+                    : SummaryPrompt.merge(decodedChunks, schema: .lecture)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                sections = SummaryPrompt.merge(decodedChunks, schema: .lecture)
+            }
+        } else {
+            sections = SummaryPrompt.merge(decodedChunks, schema: schema)
         }
         let revision = SummaryRevision(
             id: "summary-\(UUID().uuidString)",
             purpose: input.purpose,
             sourceTranscriptRevisionID: input.transcript.id,
             annotationRevisionID: input.annotations?.id ?? "none",
-            promptVersion: "openai-v2",
+            promptVersion: "openai-v6",
             modelID: modelID,
-            sections: SummaryPrompt.merge(decodedChunks),
+            sections: sections,
             inputHash: input.inputHash
         )
         try DomainValidator.validate(revision, transcript: input.transcript)

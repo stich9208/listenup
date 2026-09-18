@@ -8,11 +8,13 @@ public struct SummaryDocumentItem: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let text: String
     public let detail: String?
+    public let children: [SummaryDocumentItem]
 
-    public init(id: UUID, text: String, detail: String? = nil) {
+    public init(id: UUID, text: String, detail: String? = nil, children: [SummaryDocumentItem] = []) {
         self.id = id
         self.text = text
         self.detail = detail
+        self.children = children
     }
 }
 
@@ -21,12 +23,14 @@ public struct SummaryDocumentSection: Identifiable, Equatable, Sendable {
     public let title: String
     public let items: [SummaryDocumentItem]
     public let numbered: Bool
+    public let headingLevel: Int
 
-    public init(title: String, items: [SummaryDocumentItem], numbered: Bool = false) {
+    public init(title: String, items: [SummaryDocumentItem], numbered: Bool = false, headingLevel: Int = 2) {
         self.id = title
         self.title = title
         self.items = items
         self.numbered = numbered
+        self.headingLevel = headingLevel
     }
 }
 
@@ -57,17 +61,32 @@ public struct MarkdownExporter: Sendable {
         return out
     }
 
+    public func plainTranscript(_ revision: TranscriptRevision) throws -> String {
+        try DomainValidator.validate(revision)
+        return revision.segments
+            .sorted { $0.startMs < $1.startMs }
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     public func summary(_ revision: SummaryRevision, title: String? = nil) -> String {
         let document = summaryDocument(revision, title: title)
         var out = "# \(document.title)\n\n"
-        for section in document.sections {
-            out += "## \(section.title)\n\n"
-            for (index, item) in section.items.enumerated() {
-                let marker = section.numbered ? "\(index + 1)." : "-"
-                out += "\(marker) \(item.text)"
-                if let detail = item.detail { out += " — \(detail)" }
-                out += "\n"
+        func render(_ items: [SummaryDocumentItem], numbered: Bool, depth: Int) -> String {
+            var value = ""
+            for (index, item) in items.enumerated() {
+                let marker = numbered && depth == 0 ? "\(index + 1)." : "-"
+                value += "\(String(repeating: "  ", count: depth))\(marker) \(item.text)"
+                if let detail = item.detail { value += " — \(detail)" }
+                value += "\n"
+                value += render(item.children, numbered: false, depth: depth + 1)
             }
+            return value
+        }
+        for section in document.sections {
+            out += "\(String(repeating: "#", count: section.headingLevel)) \(section.title)\n\n"
+            out += render(section.items, numbered: section.numbered, depth: 0)
             out += "\n"
         }
         return out
@@ -80,6 +99,14 @@ public struct MarkdownExporter: Sendable {
         func section(_ title: String, _ values: [SummaryItem], numbered: Bool = false) -> SummaryDocumentSection? {
             guard !values.isEmpty else { return nil }
             return SummaryDocumentSection(title: title, items: items(values), numbered: numbered)
+        }
+        func limited(_ values: [SummaryItem], to count: Int) -> [SummaryItem] {
+            guard values.count > count else { return values }
+            guard count > 1 else { return Array(values.prefix(count)) }
+            return (0..<count).map { index in
+                let sourceIndex = Int((Double(index) * Double(values.count - 1) / Double(count - 1)).rounded())
+                return values[sourceIndex]
+            }
         }
 
         var sections: [SummaryDocumentSection?]
@@ -98,15 +125,33 @@ public struct MarkdownExporter: Sendable {
                 section("미결사항", revision.sections.openIssues + revision.sections.disagreements + revision.sections.uncertainties, numbered: true),
             ]
         } else {
-            sections = [
-                section("강의 개요", revision.sections.overview),
-                section("주제", revision.sections.topics),
-                section("개념", revision.sections.concepts),
-                section("예시와 계산", revision.sections.examples),
-                section("핵심 정리", revision.sections.emphasizedPoints),
-                section("복습 질문", revision.sections.reviewQuestions),
-                section("불확실한 내용", revision.sections.uncertainties),
-            ]
+            if let notes = revision.sections.lectureNotes, !notes.isEmpty {
+                func documentItem(_ item: StudyNoteItem) -> SummaryDocumentItem {
+                    SummaryDocumentItem(
+                        id: item.id,
+                        text: item.text,
+                        children: item.children.map(documentItem)
+                    )
+                }
+                sections = notes.compactMap { note in
+                    guard !note.items.isEmpty else { return nil }
+                    return SummaryDocumentSection(
+                        title: note.title,
+                        items: note.items.map(documentItem),
+                        headingLevel: 3
+                    )
+                }
+            } else {
+                // Legacy display path for summaries created before structured
+                // lecture notes were introduced.
+                sections = [
+                    section("강의 개요", limited(revision.sections.overview, to: 2)),
+                    section("챕터별 요약", limited(revision.sections.topics, to: 12), numbered: true),
+                    section("핵심 개념", limited(revision.sections.concepts, to: 12)),
+                    section("대표 예시와 계산", limited(revision.sections.examples, to: 6)),
+                    section("꼭 기억할 내용", limited(revision.sections.emphasizedPoints, to: 6)),
+                ]
+            }
         }
         return SummaryDocument(
             title: title ?? (revision.purpose == .meeting ? "회의 요약" : "강의 요약"),
@@ -142,6 +187,7 @@ public struct MarkdownExporter: Sendable {
         try content.data(using: .utf8)!.write(to: target, options: .atomic); return target
     }
 
+    @discardableResult public func copyPlainTextToPasteboard(_ text: String) -> Bool { let p = NSPasteboard.general; p.clearContents(); return p.setString(text, forType: .string) }
     @discardableResult public func copyMarkdownToPasteboard(_ markdown: String) -> Bool { let p = NSPasteboard.general; p.clearContents(); return p.setString(markdown, forType: .string) && p.setString(Self.html(from: markdown), forType: .html) }
     private func transcriptMarkdown(_ revision: TranscriptRevision, title: String) throws -> String { try transcript(revision, title: title) }
     private static func timestamp(_ ms: Int64) -> String { String(format: "%02d:%02d:%02d", ms / 3_600_000, (ms / 60_000) % 60, (ms / 1_000) % 60) }

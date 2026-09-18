@@ -4,6 +4,27 @@ import AudioToolbox
 import ListenUpDomain
 
 final class SessionStoreTests: XCTestCase {
+    func testReopenDoesNotCreateSessionStructureWhenManifestIsMissing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let invalidSession = root.appendingPathComponent("not-a-session", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: invalidSession, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(try SessionStore.reopen(invalidSession))
+        for directory in ["audio", "processing", "revisions"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: invalidSession.appendingPathComponent(directory).path))
+        }
+    }
+
+    func testSessionCreationDoesNotCreateExportDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SessionStore.create(in: root, session: Session(title: "internal", purpose: .meeting, inputSource: .microphone))
+        let sessionDirectory = await store.sessionDirectory
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDirectory.appendingPathComponent("exports").path))
+    }
+
     func testRoundTripJournalAndImmutableRevision() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

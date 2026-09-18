@@ -181,6 +181,37 @@ public struct SummaryItem: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct StudyNoteItem: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var text: String
+    public var children: [StudyNoteItem]
+    public var evidenceSegmentIDs: [String]
+
+    public init(
+        id: UUID = UUID(),
+        text: String,
+        children: [StudyNoteItem] = [],
+        evidenceSegmentIDs: [String] = []
+    ) {
+        self.id = id
+        self.text = text
+        self.children = children
+        self.evidenceSegmentIDs = evidenceSegmentIDs
+    }
+}
+
+public struct StudyNoteSection: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var items: [StudyNoteItem]
+
+    public init(id: UUID = UUID(), title: String, items: [StudyNoteItem] = []) {
+        self.id = id
+        self.title = title
+        self.items = items
+    }
+}
+
 public struct ActionItem: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var task: String
@@ -195,6 +226,9 @@ public struct ActionItem: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct SummarySections: Codable, Equatable, Sendable {
+    /// Topic-shaped lecture notes. Optional so sessions written by older app
+    /// versions continue to decode without migration.
+    public var lectureNotes: [StudyNoteSection]?
     public var overview: [SummaryItem]
     public var topics: [SummaryItem]
     public var concepts: [SummaryItem]
@@ -208,7 +242,8 @@ public struct SummarySections: Codable, Equatable, Sendable {
     public var disagreements: [SummaryItem]
     public var uncertainties: [SummaryItem]
 
-    public init(overview: [SummaryItem] = [], topics: [SummaryItem] = [], concepts: [SummaryItem] = [], examples: [SummaryItem] = [], emphasizedPoints: [SummaryItem] = [], reviewQuestions: [SummaryItem] = [], agendaItems: [SummaryItem] = [], decisions: [SummaryItem] = [], actionItems: [ActionItem] = [], openIssues: [SummaryItem] = [], disagreements: [SummaryItem] = [], uncertainties: [SummaryItem] = []) {
+    public init(lectureNotes: [StudyNoteSection]? = nil, overview: [SummaryItem] = [], topics: [SummaryItem] = [], concepts: [SummaryItem] = [], examples: [SummaryItem] = [], emphasizedPoints: [SummaryItem] = [], reviewQuestions: [SummaryItem] = [], agendaItems: [SummaryItem] = [], decisions: [SummaryItem] = [], actionItems: [ActionItem] = [], openIssues: [SummaryItem] = [], disagreements: [SummaryItem] = [], uncertainties: [SummaryItem] = []) {
+        self.lectureNotes = lectureNotes
         self.overview = overview; self.topics = topics; self.concepts = concepts; self.examples = examples
         self.emphasizedPoints = emphasizedPoints; self.reviewQuestions = reviewQuestions; self.agendaItems = agendaItems
         self.decisions = decisions; self.actionItems = actionItems; self.openIssues = openIssues
@@ -327,6 +362,13 @@ public enum DomainValidator {
 
     private static func allSummaryEvidence(_ sections: SummarySections) -> [String] {
         let items = sections.overview + sections.topics + sections.concepts + sections.examples + sections.emphasizedPoints + sections.reviewQuestions + sections.agendaItems + sections.decisions + sections.openIssues + sections.disagreements + sections.uncertainties
-        return items.flatMap(\.evidenceSegmentIDs) + sections.actionItems.flatMap(\.evidenceSegmentIDs)
+        let noteEvidence = (sections.lectureNotes ?? []).flatMap { section in
+            section.items.flatMap(studyNoteEvidence)
+        }
+        return items.flatMap(\.evidenceSegmentIDs) + sections.actionItems.flatMap(\.evidenceSegmentIDs) + noteEvidence
+    }
+
+    private static func studyNoteEvidence(_ item: StudyNoteItem) -> [String] {
+        item.evidenceSegmentIDs + item.children.flatMap(studyNoteEvidence)
     }
 }

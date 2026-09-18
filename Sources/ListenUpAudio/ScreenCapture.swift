@@ -11,6 +11,14 @@ public struct SystemAudioCaptureConfiguration: Sendable, Equatable {
     public init(excludesCurrentProcessAudio: Bool = true, applicationID: String? = nil) { self.excludesCurrentProcessAudio = excludesCurrentProcessAudio; self.applicationID = applicationID }
 }
 
+public enum ScreenCaptureAuthorization {
+    public static func isDenied(_ error: Error) -> Bool {
+        let value = error as NSError
+        return value.domain == SCStreamErrorDomain
+            && value.code == SCStreamError.Code.userDeclined.rawValue
+    }
+}
+
 public final class ScreenCaptureProvider: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     public private(set) var configuration: SystemAudioCaptureConfiguration
     private let sampleQueue = DispatchQueue(label: "listenup.system-audio.capture")

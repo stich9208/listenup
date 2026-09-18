@@ -39,7 +39,6 @@ private struct RecordingView: View {
                     apiConfiguration
                     sessionSetup
                     audioSetup
-                    storageSetup
                     recordingActions
                 }
 
@@ -60,7 +59,7 @@ private struct RecordingView: View {
             Text(model.isRecording ? "녹음 중" : "새 녹음")
                 .font(.system(size: 32, weight: .bold))
             Text(model.isRecording
-                 ? "녹음은 계속 진행됩니다. 필요한 부분을 다시 들으며 북마크를 남길 수 있습니다."
+                 ? "입력 레벨을 확인하며 녹음하세요. 다른 앱을 사용해도 녹음은 계속됩니다."
                  : "강의나 회의를 녹음한 뒤 전체 전사와 목적에 맞는 요약을 만듭니다.")
                 .font(.body)
                 .foregroundStyle(.secondary)
@@ -119,60 +118,66 @@ private struct RecordingView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("소리를 녹음할 앱")
                             .font(.subheadline.weight(.medium))
-                        HStack(spacing: 10) {
-                            Picker("소리를 녹음할 앱", selection: $model.selectedApplicationID) {
-                                Text("앱을 선택하세요").tag(String?.none)
-                                ForEach(model.availableApplications) { app in
-                                    Text(app.name).tag(Optional(app.id))
+
+                        if model.screenCapturePermissionBlocked {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label(
+                                    "앱 목록을 보려면 화면 및 시스템 오디오 녹음 권한이 필요합니다.",
+                                    systemImage: "exclamationmark.shield.fill"
+                                )
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.orange)
+
+                                Text("설정에서 ListenUp 권한을 껐다가 다시 켠 뒤 앱을 완전히 종료하고 다시 여세요.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                HStack(spacing: 10) {
+                                    Button("권한 다시 확인", systemImage: "arrow.clockwise") {
+                                        Task { await model.refreshApplications() }
+                                    }
+                                    .disabled(model.isBusy || model.captureActive)
+
+                                    Button("시스템 설정 열기", systemImage: "gearshape") {
+                                        model.openScreenCaptureSettings()
+                                    }
+
+                                    Button("ListenUp 종료", systemImage: "power") {
+                                        model.quitForScreenCapturePermissionChange()
+                                    }
                                 }
                             }
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        } else {
+                            HStack(spacing: 10) {
+                                Picker("소리를 녹음할 앱", selection: $model.selectedApplicationID) {
+                                    Text("앱을 선택하세요").tag(String?.none)
+                                    ForEach(model.availableApplications) { app in
+                                        Text(app.name).tag(Optional(app.id))
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(maxWidth: .infinity)
 
-                            Button {
-                                Task { await model.refreshApplications() }
-                            } label: {
-                                Label("목록 새로 고침", systemImage: "arrow.clockwise")
+                                Button {
+                                    Task { await model.refreshApplications() }
+                                } label: {
+                                    Label("목록 새로 고침", systemImage: "arrow.clockwise")
+                                }
+                                .disabled(model.isBusy || model.captureActive)
                             }
-                            .disabled(model.isBusy || model.captureActive)
+
+                            Text("실행 중인 앱만 표시됩니다. Zoom, Teams, Chrome처럼 소리가 재생될 앱을 먼저 실행하세요.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        Text("실행 중인 앱만 표시됩니다. Zoom, Teams, Chrome처럼 소리가 재생될 앱을 먼저 실행하세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                     .task {
                         await model.loadApplicationsIfNeeded()
                     }
                 }
-            }
-        }
-    }
-
-    private var storageSetup: some View {
-        SectionCard(
-            title: "저장 위치",
-            subtitle: "오디오, 전체 전사와 요약을 선택한 폴더 안에 함께 보관합니다.",
-            systemImage: "folder"
-        ) {
-            HStack(spacing: 12) {
-                Image(systemName: model.rootDirectory == nil ? "folder.badge.questionmark" : "checkmark.circle.fill")
-                    .foregroundStyle(model.rootDirectory == nil ? Color.secondary : Color.green)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.rootDirectory?.lastPathComponent ?? "저장 폴더를 선택하세요")
-                        .font(.subheadline.weight(.medium))
-                    if let path = model.rootDirectory?.path {
-                        Text(path)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                Spacer()
-                Button(model.rootDirectory == nil ? "폴더 선택…" : "변경…") {
-                    model.chooseRootDirectory()
-                }
-                .disabled(model.isBusy || model.captureActive)
             }
         }
     }
@@ -201,6 +206,10 @@ private struct RecordingView: View {
                 .disabled(!canStartRecording)
                 .accessibilityHint("선택한 소리를 녹음합니다")
             }
+
+            Text("녹음 작업 파일은 앱 내부에 보관되며, 결과 파일은 ‘결과물 내보내기’를 선택할 때만 생성됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if let message = readinessMessage {
                 Text(message)
@@ -256,39 +265,50 @@ private struct RecordingView: View {
             subtitle: model.purpose == .lecture ? "강의 녹음" : "회의 녹음",
             systemImage: "record.circle.fill"
         ) {
-            VStack(spacing: 26) {
+            VStack(spacing: 24) {
                 Text(AppModel.clock(model.elapsedMs))
                     .font(.system(size: 50, weight: .semibold, design: .monospaced))
                     .accessibilityLabel("녹음 시간 \(AppModel.clock(model.elapsedMs))")
 
-                HStack(spacing: 6) {
-                    Circle().fill(.red).frame(width: 8, height: 8)
-                    Text("녹음 중")
-                    Text("·")
-                    Text("저장된 오디오 조각 \(model.session?.tracks.count ?? 0)개")
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Button("15초 전부터 듣기", systemImage: "gobackward.15") { Task { await model.rewind() } }
-                    Button("다시 듣기 정지", systemImage: "stop.fill") { Task { await model.stopReplay() } }
-                    Button("현재 위치로", systemImage: "dot.radiowaves.left.and.right") { Task { await model.returnToLive() } }
-                }
-
-                Divider()
-
-                HStack {
-                    Button("북마크", systemImage: "bookmark") { Task { await model.addBookmark() } }
-                    Spacer()
-                    Button("녹음 종료", systemImage: "stop.circle.fill", role: .destructive) {
-                        Task { await model.stopRecording() }
+                VStack(spacing: 12) {
+                    if model.requiresMicrophone {
+                        RecordingLevelMeter(label: "마이크", level: model.microphoneLevel)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.isBusy)
+                    if model.requiresSystemAudio {
+                        RecordingLevelMeter(label: "앱 소리", level: model.systemAudioLevel)
+                    }
                 }
+
+                if model.elapsedMs >= 3_000 && model.recordingLevelIsLow {
+                    Label("소리가 거의 감지되지 않습니다. 입력 장치와 음량을 확인하세요.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+
+                VStack(spacing: 10) {
+                    Button(role: .destructive) {
+                        Task { await model.stopRecording() }
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 27, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 74, height: 74)
+                            .background(.red, in: Circle())
+                            .shadow(color: .red.opacity(0.24), radius: 10, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isBusy)
+
+                    Text("녹음 종료")
+                        .font(.headline)
+                }
+
+                Text("저장된 오디오 조각 \(model.session?.tracks.count ?? 0)개")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -301,10 +321,12 @@ private struct RecordingView: View {
             return "제목을 입력하면 녹음을 시작할 수 있습니다."
         }
         if model.rootDirectory == nil {
-            return "저장 폴더를 선택하면 녹음을 시작할 수 있습니다."
+            return "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."
         }
         if model.requiresSystemAudio && model.selectedApplication == nil {
-            return "소리를 녹음할 앱을 선택하면 녹음을 시작할 수 있습니다."
+            return model.screenCapturePermissionBlocked
+                ? "화면 및 시스템 오디오 녹음 권한을 허용한 뒤 ListenUp을 다시 열어 주세요."
+                : "소리를 녹음할 앱을 선택하면 녹음을 시작할 수 있습니다."
         }
         return nil
     }
@@ -341,43 +363,35 @@ private struct RecordingView: View {
 
 private struct ResultView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var selectedResultTab: ResultTab = .transcript
+
+    private enum ResultTab: Hashable {
+        case transcript
+        case summary
+    }
 
     var body: some View {
         Group {
             if let session = model.session {
-                VStack(alignment: .leading, spacing: 18) {
-                    resultHeader(session)
-                    apiBar
-
-                    if session.summaryStale {
-                        NoticeBanner(
-                            message: "용도나 교정본이 바뀌었습니다. 최신 내용으로 요약을 다시 생성해 주세요.",
-                            kind: .warning
-                        )
-                    }
-
-                    if !model.resultNotice.isEmpty {
-                        resultNotice(session)
-                    }
-
-                    actionBar(session)
-
-                    if shouldShowProcessingIndicator {
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text(model.processingProgress)
-                                .font(.subheadline.weight(.medium))
+                if isAwaitingProcessing(session) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            resultHeader(session)
+                            recordingReadyPanel(session)
                         }
-                        .accessibilityElement(children: .combine)
+                        .padding(.horizontal, 36)
+                        .padding(.vertical, 30)
+                        .frame(maxWidth: 1240, alignment: .leading)
+                        .frame(maxWidth: .infinity)
                     }
-
-                    resultTabs
-                    copyActions
+                } else {
+                    GeometryReader { proxy in
+                        ScrollView {
+                            completedResult(session, availableHeight: proxy.size.height)
+                                .frame(width: proxy.size.width)
+                        }
+                    }
                 }
-                .padding(.horizontal, 36)
-                .padding(.vertical, 30)
-                .frame(maxWidth: 1240, alignment: .leading)
-                .frame(maxWidth: .infinity)
             } else {
                 ContentUnavailableView(
                     "아직 녹음이 없습니다",
@@ -388,6 +402,48 @@ private struct ResultView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func isAwaitingProcessing(_ session: Session) -> Bool {
+        session.processingStatus == .notStarted && model.transcript == nil
+    }
+
+    private func completedResult(_ session: Session, availableHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            resultHeader(session)
+            apiBar
+
+            if session.summaryStale {
+                NoticeBanner(
+                    message: "용도나 교정본이 바뀌었습니다. 최신 내용으로 요약을 다시 생성해 주세요.",
+                    kind: .warning
+                )
+            }
+
+            if !model.resultNotice.isEmpty {
+                resultNotice(session)
+            }
+
+            actionBar(session)
+
+            if shouldShowProcessingIndicator {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(model.processingProgress)
+                        .font(.subheadline.weight(.medium))
+                }
+                .accessibilityElement(children: .combine)
+            }
+
+            resultTabs
+                .frame(height: max(260, availableHeight - 360))
+            copyAction
+            exportBar(session)
+        }
+        .padding(.horizontal, 36)
+        .padding(.vertical, 22)
+        .frame(maxWidth: 1240, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .top)
     }
 
     private func resultHeader(_ session: Session) -> some View {
@@ -414,6 +470,103 @@ private struct ResultView: View {
                 .disabled(model.isBusy || model.captureActive)
             }
             .foregroundStyle(.secondary)
+        }
+    }
+
+    private func recordingReadyPanel(_ session: Session) -> some View {
+        SectionCard(
+            title: "녹음이 저장되었습니다",
+            subtitle: "녹음을 확인한 뒤 전사와 요약을 시작하세요.",
+            systemImage: "checkmark.circle.fill"
+        ) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 18) {
+                    Image(systemName: "waveform.circle.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(AppModel.clock(model.recordingDurationMs))
+                            .font(.title2.monospacedDigit().weight(.semibold))
+                        Text("\(inputSourceName(session.inputSource)) · 오디오 조각 \(session.tracks.count)개")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                NoticeBanner(
+                    message: model.recordingLevelIsLow
+                        ? "입력 소리가 매우 작았습니다. 녹음을 확인하고 필요하면 입력 장치나 음량을 조정한 뒤 다시 녹음하세요."
+                        : "녹음이 앱 내부에 안전하게 보관되었습니다. 파일은 원할 때만 내보낼 수 있습니다.",
+                    kind: model.recordingLevelIsLow ? .warning : .information
+                )
+
+                HStack(spacing: 10) {
+                    Button(model.previewPlaying ? "재생 중지" : "녹음 확인", systemImage: model.previewPlaying ? "stop.fill" : "play.fill") {
+                        Task { await model.toggleRecordingPreview() }
+                    }
+                    if session.inputSource != .importedFile {
+                        Button("녹음 다시하기", systemImage: "arrow.counterclockwise.circle") {
+                            Task { await model.restartRecording() }
+                        }
+                        .help("기존 녹음은 유지하고 같은 설정으로 새 녹음을 시작합니다.")
+                        .accessibilityHint("기존 녹음을 유지하고 같은 제목과 설정으로 새 녹음을 시작합니다")
+                    }
+                }
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Image(systemName: model.hasAPIKey ? "checkmark.circle.fill" : "key.fill")
+                        .foregroundStyle(model.hasAPIKey ? .green : .orange)
+                    Text(model.hasAPIKey ? "OpenAI 연결 설정됨" : "전사하려면 OpenAI API 키가 필요합니다.")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    SettingsLink {
+                        Label("API 설정", systemImage: "gearshape")
+                    }
+                }
+
+                if model.hasAPIKey {
+                    Button {
+                        Task { await model.processSession() }
+                    } label: {
+                        Label("전사와 요약 시작", systemImage: "waveform.and.magnifyingglass")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(model.isBusy)
+                } else {
+                    SettingsLink {
+                        Label("API 키 설정", systemImage: "key.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("새 녹음", systemImage: "record.circle") {
+                        Task { await model.prepareAnotherRecording() }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func inputSourceName(_ source: InputSource) -> String {
+        switch source {
+        case .microphone: "마이크"
+        case .systemAudio: "앱 소리"
+        case .microphoneAndSystem: "마이크 + 앱 소리"
+        case .importedFile: "가져온 오디오"
         }
     }
 
@@ -461,8 +614,6 @@ private struct ResultView: View {
 
     private func actionBar(_ session: Session) -> some View {
         HStack(spacing: 10) {
-            Button("세션 폴더 열기", systemImage: "folder") { model.openSessionFolder() }
-
             if model.hasCompleteTranscript {
                 Label("전사 완료", systemImage: "checkmark.circle.fill")
                     .font(.subheadline.weight(.medium))
@@ -481,43 +632,61 @@ private struct ResultView: View {
             }
             .disabled(model.isBusy || model.transcript == nil || !model.hasAPIKey)
 
-            Button("결과물 내보내기", systemImage: "square.and.arrow.up") {
-                Task { await model.exportResultBundle() }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.isBusy || model.captureActive || model.transcript == nil || model.summary == nil || session.tracks.isEmpty)
-
             Spacer()
         }
     }
 
     private var resultTabs: some View {
-        TabView {
+        TabView(selection: $selectedResultTab) {
             transcriptEditor
                 .tabItem { Label("전체 전사", systemImage: "text.alignleft") }
+                .tag(ResultTab.transcript)
             ScrollView {
                 summaryContent
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(24)
             }
             .tabItem { Label("요약", systemImage: "list.bullet.rectangle") }
+            .tag(ResultTab.summary)
         }
-        .frame(minHeight: 430)
+        .frame(minHeight: 160, maxHeight: .infinity)
     }
 
-    private var copyActions: some View {
+    private var copyAction: some View {
         HStack(spacing: 10) {
-            Text("Notion에 붙여넣기 좋은 형식으로 복사됩니다.")
+            Text(selectedResultTab == .transcript
+                 ? "시간 정보 없이 받아쓰기 텍스트만 복사됩니다."
+                 : "Markdown 형식으로 복사됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("전체 전사 복사") { model.copyResult(.transcript) }
-                .disabled(model.transcript == nil)
-            Button("요약 복사") { model.copyResult(.summary) }
-                .disabled(model.summary == nil)
-            Button("요약 + 전체 복사", systemImage: "doc.on.doc") { model.copyResult(.combined) }
+
+            Button(
+                selectedResultTab == .transcript ? "전체 전사 복사" : "요약 복사",
+                systemImage: "doc.on.doc"
+            ) {
+                model.copyResult(selectedResultTab == .transcript ? .transcript : .summary)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selectedResultTab == .transcript ? model.transcript == nil : model.summary == nil)
+        }
+    }
+
+    private func exportBar(_ session: Session) -> some View {
+        VStack(spacing: 12) {
+            Divider()
+            HStack(spacing: 12) {
+                Text("녹음 M4A와 요약·전체 전사 HTML을 ZIP으로 내보냅니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("결과물 내보내기", systemImage: "square.and.arrow.up") {
+                    Task { await model.exportResultBundle() }
+                }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.transcript == nil)
+                .controlSize(.large)
+                .disabled(model.isBusy || model.captureActive || model.transcript == nil || model.summary == nil || session.tracks.isEmpty)
+            }
         }
     }
 
@@ -557,7 +726,25 @@ private struct ResultView: View {
     }
 
     private var transcriptText: String {
-        guard let transcript = model.transcript else { return "OpenAI API 키를 설정한 뒤 전사를 시작할 수 있습니다." }
+        guard let transcript = model.transcript else {
+            guard let status = model.session?.processingStatus else { return "전사할 녹음이 없습니다." }
+            switch status {
+            case .preparing, .transcribing:
+                return model.processingProgress.isEmpty ? "전사를 준비하고 있습니다." : model.processingProgress
+            case .summarizing:
+                return "전사는 완료되었고 요약을 만들고 있습니다."
+            case .failed:
+                return "전사를 만들지 못했습니다. 위 오류를 확인한 뒤 다시 시도하세요."
+            case .cancelled:
+                return "전사가 취소되었습니다. 준비되면 다시 시작할 수 있습니다."
+            case .notStarted:
+                return model.hasAPIKey
+                    ? "전사와 요약 시작을 눌러 처리를 시작하세요."
+                    : "OpenAI API 키를 설정한 뒤 전사를 시작할 수 있습니다."
+            case .ready, .paused, .partial:
+                return "저장된 전사를 불러오지 못했습니다. 세션을 다시 열어 보세요."
+            }
+        }
         return transcript.segments.map { "[\(AppModel.clock($0.startMs))] \($0.text)" }.joined(separator: "\n\n")
     }
 
@@ -570,7 +757,7 @@ private struct ResultView: View {
                     .foregroundStyle(.secondary)
                 TextEditor(text: $model.transcriptDraft)
                     .font(.body.monospaced())
-                    .frame(minHeight: 240)
+                    .frame(minHeight: 160, maxHeight: .infinity)
                     .padding(8)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     .overlay {
@@ -617,22 +804,7 @@ private struct ResultView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(section.title)
                             .font(.title3.weight(.semibold))
-                        ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
-                            HStack(alignment: .top, spacing: 9) {
-                                Text(section.numbered ? "\(index + 1)." : "•")
-                                    .foregroundStyle(.secondary)
-                                    .frame(minWidth: section.numbered ? 20 : 10, alignment: .trailing)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.text).textSelection(.enabled)
-                                    if let detail = item.detail {
-                                        Text(detail)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                            }
-                        }
+                        SummaryItemsView(items: section.items, numbered: section.numbered)
                     }
                 }
             }
@@ -643,6 +815,83 @@ private struct ResultView: View {
                 description: Text(model.transcript == nil ? "전사가 끝나면 요약을 생성할 수 있습니다." : "요약 생성을 눌러 목적에 맞는 문서를 만드세요.")
             )
         }
+    }
+}
+
+private struct SummaryItemsView: View {
+    let items: [SummaryDocumentItem]
+    let numbered: Bool
+    var depth: Int = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: depth == 0 ? 9 : 6) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                HStack(alignment: .top, spacing: 9) {
+                    Text(numbered ? "\(index + 1)." : "•")
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: numbered ? 20 : 10, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text((try? AttributedString(markdown: item.text)) ?? AttributedString(item.text))
+                            .textSelection(.enabled)
+                        if let detail = item.detail {
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        if !item.children.isEmpty {
+                            SummaryItemsView(items: item.children, numbered: false, depth: depth + 1)
+                                .padding(.leading, 8)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct RecordingLevelMeter: View {
+    let label: String
+    let level: Float
+
+    private var clampedLevel: CGFloat { CGFloat(min(1, max(0, level))) }
+    private var stateText: String {
+        if level < 0.08 { return "소리 없음" }
+        if level < 0.25 { return "작음" }
+        if level > 0.9 { return "너무 큼" }
+        return "적정"
+    }
+    private var meterColor: Color {
+        if level < 0.25 { return .orange }
+        if level > 0.9 { return .red }
+        return .green
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+                .frame(width: 54, alignment: .trailing)
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.14))
+                    Capsule()
+                        .fill(meterColor.gradient)
+                        .frame(width: max(4, proxy.size.width * clampedLevel))
+                        .animation(.linear(duration: 0.08), value: clampedLevel)
+                }
+            }
+            .frame(height: 12)
+
+            Text(stateText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(meterColor)
+                .frame(width: 50, alignment: .leading)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) 입력 음량")
+        .accessibilityValue(stateText)
     }
 }
 
@@ -747,15 +996,6 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("저장 위치") {
-                LabeledContent("세션") {
-                    Text(model.rootDirectory?.path ?? "선택되지 않음")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Button("폴더 변경…") { model.chooseRootDirectory() }
-                    .disabled(model.isBusy || model.captureActive)
-            }
             Section("OpenAI API 키") {
                 HStack {
                     SecureField(model.hasAPIKey ? "새 API 키로 변경" : "OpenAI API 키", text: $model.apiKeyDraft)

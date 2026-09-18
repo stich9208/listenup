@@ -151,15 +151,123 @@ private final class MockModelURLProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
-@Test func summaryRequiresEvidenceAndGeneratedReviewQuestionFlag() {
+@Test func summaryRequiresEvidenceAndRejectsReviewQuestions() {
     let missingEvidence = SummarySections(overview: [SummaryItem(text: "unsupported")])
     #expect(throws: ListenUpError.missingReference("summary evidence")) {
         try SummaryPrompt.validate(missingEvidence, schema: .lecture, allowedSegmentIDs: ["s"])
     }
-    let wrongGeneratedFlag = SummarySections(reviewQuestions: [SummaryItem(text: "question", evidenceSegmentIDs: ["s"], generated: false)])
+    let reviewQuestion = SummarySections(reviewQuestions: [SummaryItem(text: "question", evidenceSegmentIDs: ["s"], generated: true)])
     #expect(throws: ListenUpError.invalidModelResponse("lecture summary schema")) {
-        try SummaryPrompt.validate(wrongGeneratedFlag, schema: .lecture, allowedSegmentIDs: ["s"])
+        try SummaryPrompt.validate(reviewQuestion, schema: .lecture, allowedSegmentIDs: ["s"])
     }
+}
+
+@Test func lecturePromptRequestsStructuredStudyNotesWithoutReviewQuestions() {
+    let transcript = TranscriptRevision(
+        id: "t",
+        segments: [TranscriptSegment(id: "s", text: "벡터의 핵심 개념", startMs: 0, endMs: 1, requestID: "r")],
+        coverage: Coverage(startMs: 0, endMs: 1),
+        modelID: "m",
+        configurationHash: "c"
+    )
+    let input = SummaryInput(purpose: .lecture, transcript: transcript, inputHash: "h")
+    let prompt = SummaryPrompt.make(input: input, schema: .lecture)
+
+    #expect(prompt.contains("복습 질문은 만들지 마세요"))
+    #expect(prompt.contains("첫 섹션 title은 반드시 \"학습 내용\""))
+    #expect(prompt.contains("실제로 다룬 주제명을 섹션 title"))
+    #expect(prompt.contains("children"))
+    #expect(prompt.contains("강의 JSON 키는 lectureNotes만"))
+    #expect(prompt.contains("불확실한 내용"))
+    #expect(!prompt.contains("reviewQuestions만"))
+}
+
+@Test func lectureMergeCapsSectionsAndDropsReviewQuestions() {
+    func items(_ prefix: String, count: Int) -> [SummaryItem] {
+        (0..<count).map { SummaryItem(text: "\(prefix) \($0)", evidenceSegmentIDs: ["s\($0)"]) }
+    }
+    let first = SummarySections(
+        overview: items("개요", count: 3), topics: items("주제", count: 15), concepts: items("개념", count: 15),
+        examples: items("예시", count: 9), emphasizedPoints: items("핵심", count: 9),
+        reviewQuestions: [SummaryItem(text: "질문", evidenceSegmentIDs: ["s0"], generated: true)],
+        uncertainties: items("불확실", count: 4)
+    )
+    let merged = SummaryPrompt.merge([first], schema: .lecture)
+
+    #expect(merged.overview.count == 2)
+    #expect(merged.topics.count == 12)
+    #expect(merged.concepts.count == 12)
+    #expect(merged.examples.count == 6)
+    #expect(merged.emphasizedPoints.count == 6)
+    #expect(merged.uncertainties.isEmpty)
+    #expect(merged.reviewQuestions.isEmpty)
+}
+
+@Test func lectureConsolidationPromptRequestsTopicCoverageAndHierarchy() {
+    let internalID = UUID(uuidString: "00000000-0000-0000-0000-000000000123")!
+    let chunks = [
+        SummarySections(lectureNotes: [StudyNoteSection(title: "벡터", items: [StudyNoteItem(id: internalID, text: "벡터 정의", evidenceSegmentIDs: ["s1"])])]),
+        SummarySections(lectureNotes: [StudyNoteSection(title: "행렬", items: [StudyNoteItem(text: "행렬 정의", evidenceSegmentIDs: ["s2"])])])
+    ]
+    let prompt = SummaryPrompt.makeLectureConsolidation(chunks: chunks)
+
+    #expect(prompt.contains("전체 강의 노트를 복원"))
+    #expect(prompt.contains("첫 섹션 title은 반드시 \"학습 내용\""))
+    #expect(prompt.contains("실제 강의 주제명"))
+    #expect(prompt.contains("children"))
+    #expect(prompt.contains("처음부터 끝까지 반영"))
+    #expect(prompt.contains("s1"))
+    #expect(prompt.contains("s2"))
+    #expect(!prompt.contains(internalID.uuidString))
+}
+
+@Test func lectureConsolidationRejectsOverlyShortResult() {
+    let source = [
+        SummarySections(lectureNotes: [
+            StudyNoteSection(title: "학습 내용", items: [StudyNoteItem(text: "개요", evidenceSegmentIDs: ["s1"])]),
+            StudyNoteSection(title: "벡터", items: [StudyNoteItem(text: "벡터 설명", evidenceSegmentIDs: ["s1"])]),
+            StudyNoteSection(title: "행렬", items: [StudyNoteItem(text: "행렬 설명", evidenceSegmentIDs: ["s2"])])
+        ])
+    ]
+    let tooShort = SummarySections(lectureNotes: [
+        StudyNoteSection(title: "학습 내용", items: [StudyNoteItem(text: "한 줄", evidenceSegmentIDs: ["s1"])])
+    ])
+
+    #expect(!SummaryPrompt.lectureConsolidationHasAdequateCoverage(tooShort, chunks: source))
+    #expect(SummaryPrompt.lectureConsolidationHasAdequateCoverage(source[0], chunks: source))
+}
+
+@Test func lectureDecoderBuildsNestedStudyNotes() throws {
+    let segments = [
+        TranscriptSegment(id: "s1", text: "R 작업폴더", startMs: 0, endMs: 1, requestID: "r"),
+        TranscriptSegment(id: "s2", text: "setwd 예시", startMs: 1, endMs: 2, requestID: "r")
+    ]
+    let raw = #"{"lectureNotes":[{"title":"학습 내용","items":[{"text":"R 작업폴더 설정","children":[],"evidenceSegmentIDs":["s1"]}]},{"title":"R 작업폴더 (Working Directory)","items":[{"text":"`setwd(\"경로\")`: 작업폴더 지정","children":[{"text":"예시: `setwd(\"C:/R_test\")`","children":[],"evidenceSegmentIDs":["s2"]}],"evidenceSegmentIDs":["s1"]}]}],"uncertainties":[]}"#
+
+    let decoded = try SummaryPrompt.decodeAndValidate(from: raw, schema: .lecture, segments: segments)
+
+    #expect(decoded.lectureNotes?.map(\.title) == ["학습 내용", "R 작업폴더 (Working Directory)"])
+    #expect(decoded.lectureNotes?[1].items[0].children.first?.text.contains("C:/R_test") == true)
+}
+
+@Test func lectureDecoderRepairsParentEvidenceFromGroundedChildrenAndDropsUngroundedLeaves() throws {
+    let segment = TranscriptSegment(id: "s1", text: "근거가 있는 설명", startMs: 0, endMs: 1, requestID: "r")
+    let raw = #"{"lectureNotes":[{"title":"학습 내용","items":[{"text":"상위 설명","children":[{"text":"근거 있는 하위 설명","children":[],"evidenceSegmentIDs":["s1"]},{"text":"근거 없는 내용","children":[],"evidenceSegmentIDs":["invented"]}],"evidenceSegmentIDs":["wrong"]}]}],"uncertainties":[]}"#
+
+    let decoded = try SummaryPrompt.decodeAndValidate(from: raw, schema: .lecture, segments: [segment])
+
+    #expect(decoded.lectureNotes?[0].items[0].evidenceSegmentIDs == ["s1"])
+    #expect(decoded.lectureNotes?[0].items[0].children.map(\.text) == ["근거 있는 하위 설명"])
+}
+
+@Test func lectureDecoderDiscardsUnexpectedReviewQuestions() throws {
+    let segment = TranscriptSegment(id: "s", text: "벡터는 크기와 방향을 가진다.", startMs: 0, endMs: 1, requestID: "r")
+    let raw = #"{"overview":[{"text":"벡터 개요","evidenceSegmentIDs":["s"],"generated":false}],"reviewQuestions":[{"text":"벡터란?","evidenceSegmentIDs":["s"],"generated":true}]}"#
+
+    let decoded = try SummaryPrompt.decodeAndValidate(from: raw, schema: .lecture, segments: [segment])
+
+    #expect(decoded.overview.count == 1)
+    #expect(decoded.reviewQuestions.isEmpty)
 }
 
 @Test func summaryDecoderSkipsReasoningObjectsBeforeFinalJSON() throws {

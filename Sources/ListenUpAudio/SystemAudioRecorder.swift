@@ -16,10 +16,12 @@ public final class SystemAudioRecorder: @unchecked Sendable {
     private var chunkStart: CMTime?
     private var firstPresentationTime: CMTime?
     private var counter = 0
+    private var lastLevelEmissionNanoseconds: UInt64 = 0
     private let finishingGroup = DispatchGroup()
 
     public var onFinalizedChunk: (@Sendable (URL) -> Void)?
     public var onFinalizedTimedChunk: (@Sendable (URL, Int64) -> Void)?
+    public var onLevel: (@Sendable (Float) -> Void)?
     public var onError: (@Sendable (Error) -> Void)?
 
     public init(provider: ScreenCaptureProvider = .init()) {
@@ -53,10 +55,12 @@ public final class SystemAudioRecorder: @unchecked Sendable {
                 continuation.resume()
             }
         }
+        onLevel?(0)
     }
 
     private func consume(_ sample: CMSampleBuffer) {
         guard CMSampleBufferDataIsReady(sample) else { return }
+        emitLevelIfNeeded(from: sample)
         var oldWriter: PendingWriter?
         let appendError: Error? = lock.withLock {
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample)
@@ -79,6 +83,16 @@ public final class SystemAudioRecorder: @unchecked Sendable {
             finishInBackground(oldWriter)
         }
         if let appendError { onError?(appendError) }
+    }
+
+    private func emitLevelIfNeeded(from sample: CMSampleBuffer) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let shouldEmit = lock.withLock {
+            guard now - lastLevelEmissionNanoseconds >= 50_000_000 else { return false }
+            lastLevelEmissionNanoseconds = now
+            return true
+        }
+        if shouldEmit { onLevel?(AudioLevelMetering.normalizedLevel(in: sample)) }
     }
 
     private func beginChunk(at time: CMTime) throws {

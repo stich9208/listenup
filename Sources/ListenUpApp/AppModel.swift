@@ -18,13 +18,14 @@ final class AppModel: ObservableObject {
     @Published var languages = "ko"
     @Published var keywords = ""
     @Published var notes = ""
-    @Published var rootDirectory: URL?
+    @Published private(set) var rootDirectory: URL?
     @Published var availableApplications: [CaptureApplication] = []
     @Published private(set) var hasAttemptedApplicationDiscovery = false
+    @Published private(set) var screenCapturePermissionBlocked = false
     @Published var selectedApplicationID: String?
     @Published var session: Session?
     @Published var elapsedMs: Int64 = 0
-    @Published var notice = "저장 폴더를 선택하면 녹음을 시작할 수 있습니다."
+    @Published var notice = ""
     /// Setup guidance remains on the recording screen; processing feedback is kept
     /// with the result so changing tabs cannot hide an error the user is waiting on.
     @Published var resultNotice = ""
@@ -48,6 +49,11 @@ final class AppModel: ObservableObject {
     @Published var editingExclusionID: UUID?
     @Published private(set) var captureActive = false
     @Published var processingProgress = ""
+    @Published private(set) var microphoneLevel: Float = 0
+    @Published private(set) var systemAudioLevel: Float = 0
+    @Published private(set) var microphonePeakLevel: Float = 0
+    @Published private(set) var systemAudioPeakLevel: Float = 0
+    @Published private(set) var previewPlaying = false
 
     private var store: SessionStore?
     private var microphone: MicrophoneCapture?
@@ -58,14 +64,16 @@ final class AppModel: ObservableObject {
     private var pendingChunks: [(URL, SourceTrack, Int64?)] = []
     private var isRegisteringChunk = false
     private var captureFailureMessage: String?
-    private var scopedRootURL: URL?
-    private var applicationDiscoveryBlockedByPermission = false
     private let recordingIndicator = RecordingIndicatorController()
+    private var previewCompletionTask: Task<Void, Never>?
 
     init() {
         hasAPIKey = OpenAIKeychain.load()?.isEmpty == false
         apiNotice = hasAPIKey ? "OpenAI API 키가 macOS 키체인에 저장되어 있습니다." : "OpenAI API 키를 설정해 주세요."
-        restoreRootDirectory()
+        rootDirectory = Self.prepareInternalSessionsDirectory()
+        if rootDirectory == nil {
+            notice = "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."
+        }
     }
 
     var isRecording: Bool { captureActive }
@@ -78,44 +86,41 @@ final class AppModel: ObservableObject {
 
     var hasCompleteTranscript: Bool { transcript?.coverage.isComplete == true }
 
-    func chooseRootDirectory() {
-        let panel = NSOpenPanel()
-        panel.title = "ListenUp 녹음 저장 폴더"
-        panel.prompt = "이 폴더 사용"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        rootDirectory = url
-        scopedRootURL?.stopAccessingSecurityScopedResource()
-        _ = url.startAccessingSecurityScopedResource()
-        scopedRootURL = url
-        saveRootDirectory(url)
-        notice = "녹음과 결과를 \(url.lastPathComponent)에 저장합니다."
-    }
-
     func refreshApplications() async {
         hasAttemptedApplicationDiscovery = true
-        guard !applicationDiscoveryBlockedByPermission else {
-            notice = "화면 및 시스템 오디오 녹음 권한 변경은 ListenUp을 완전히 종료하고 다시 열면 적용됩니다."
-            return
-        }
         do {
             let recorder = SystemAudioRecorder()
             availableApplications = try await recorder.availableApplications()
+            screenCapturePermissionBlocked = false
             if selectedApplication == nil { selectedApplicationID = availableApplications.first?.id }
             if availableApplications.isEmpty {
                 notice = "녹음할 수 있는 실행 중인 앱을 찾지 못했습니다. 대상 앱을 먼저 실행한 뒤 목록을 새로 고침해 주세요."
+            } else {
+                notice = ""
             }
         } catch {
             availableApplications = []
-            if Self.isScreenCapturePermissionError(error) {
-                applicationDiscoveryBlockedByPermission = true
-                notice = "앱 소리를 사용하려면 시스템 설정의 ‘화면 및 시스템 오디오 녹음’에서 ListenUp을 허용한 뒤 앱을 완전히 종료하고 다시 열어 주세요."
+            selectedApplicationID = nil
+            if ScreenCaptureAuthorization.isDenied(error) {
+                screenCapturePermissionBlocked = true
+                notice = "화면 및 시스템 오디오 녹음 권한을 다시 허용해 주세요. 설정에서 ListenUp을 껐다가 켠 뒤 앱을 완전히 종료하고 다시 여세요."
             } else {
+                screenCapturePermissionBlocked = false
+                let value = error as NSError
                 notice = "녹음 가능한 앱 목록을 불러오지 못했습니다. ListenUp을 다시 연 뒤에도 계속되면 목록 새로 고침을 눌러 주세요. (\(error.localizedDescription))"
+                NSLog("ListenUp app discovery failed: %@ (%ld) %@", value.domain, value.code, value.localizedDescription)
             }
         }
+    }
+
+    func openScreenCaptureSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+        notice = "설정에서 ListenUp 권한을 껐다가 다시 켠 뒤 앱을 완전히 종료하고 다시 여세요."
+    }
+
+    func quitForScreenCapturePermissionChange() {
+        NSApplication.shared.terminate(nil)
     }
 
     func loadApplicationsIfNeeded() async {
@@ -125,7 +130,7 @@ final class AppModel: ObservableObject {
 
     func startRecording() async {
         guard !isBusy, !isRecording else { return }
-        guard let rootDirectory else { notice = "먼저 저장 폴더를 선택해 주세요."; return }
+        guard let rootDirectory else { notice = "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."; return }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { notice = "녹음 제목을 입력해 주세요."; return }
         if requiresSystemAudio && selectedApplication == nil {
@@ -136,6 +141,7 @@ final class AppModel: ObservableObject {
         isBusy = true
         resetSessionPresentation()
         captureFailureMessage = nil
+        resetRecordingLevels()
         var newSession = Session(
             title: cleanTitle,
             purpose: purpose,
@@ -161,6 +167,9 @@ final class AppModel: ObservableObject {
                 capture.onFinalizedTimedChunk = { [weak self] url, sessionStartMs in
                     Task { @MainActor in self?.enqueueChunk(url, track: .microphone, sessionStartMs: sessionStartMs) }
                 }
+                capture.onLevel = { [weak self] level in
+                    Task { @MainActor in self?.updateMicrophoneLevel(level) }
+                }
                 capture.onError = { [weak self] error in
                     Task { @MainActor in await self?.handleCaptureFailure(error) }
                 }
@@ -172,6 +181,9 @@ final class AppModel: ObservableObject {
                 let capture = SystemAudioRecorder()
                 capture.onFinalizedTimedChunk = { [weak self] url, sessionStartMs in
                     Task { @MainActor in self?.enqueueChunk(url, track: .system, sessionStartMs: sessionStartMs) }
+                }
+                capture.onLevel = { [weak self] level in
+                    Task { @MainActor in self?.updateSystemAudioLevel(level) }
                 }
                 capture.onError = { [weak self] error in
                     Task { @MainActor in await self?.handleCaptureFailure(error) }
@@ -246,49 +258,63 @@ final class AppModel: ObservableObject {
                 notice = "녹음은 끝났지만 세션 정보를 확정하지 못했습니다: \(error.localizedDescription)"
             }
         }
+        microphoneLevel = 0
+        systemAudioLevel = 0
+        resultNotice = ""
+        processingProgress = ""
+        showResults = true
         isBusy = false
     }
 
-    func rewind() async {
-        guard let replay else { notice = "재생할 확정 오디오가 아직 없습니다."; return }
-        await replay.update(spans: session?.tracks ?? [], liveHeadMs: elapsedMs)
-        await replay.seek(to: elapsedMs)
-        await replay.rewind15Seconds()
-        do { try await replay.play(); notice = "15초 전부터 다시 듣는 중입니다. 녹음은 계속됩니다." }
-        catch { notice = "재생할 확정 오디오가 아직 없습니다." }
+    func toggleRecordingPreview() async {
+        guard !captureActive, let replay, let session else { return }
+        if previewPlaying {
+            await stopReplay()
+            return
+        }
+
+        previewCompletionTask?.cancel()
+        await replay.update(spans: session.tracks, liveHeadMs: recordingDurationMs)
+        await replay.seek(to: 0)
+        do {
+            try await replay.play()
+            previewPlaying = true
+            let duration = recordingDurationMs
+            previewCompletionTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(max(1, duration)))
+                guard !Task.isCancelled else { return }
+                self?.previewPlaying = false
+            }
+        } catch {
+            notice = "녹음을 재생하지 못했습니다: \(error.localizedDescription)"
+        }
+    }
+
+    func prepareAnotherRecording() async {
+        await stopReplay()
+        title = ""
+        notice = "이전 녹음은 저장되어 있습니다. 새 녹음 정보를 입력해 주세요."
+        showResults = false
+    }
+
+    func restartRecording() async {
+        guard !isBusy, !captureActive, let current = session, current.inputSource != .importedFile else { return }
+        inputSource = current.inputSource
+        await stopReplay()
+        if requiresSystemAudio && selectedApplication == nil {
+            notice = "녹음할 앱을 다시 선택한 뒤 녹음을 시작해 주세요. 기존 녹음은 그대로 저장되어 있습니다."
+            showResults = false
+            return
+        }
+        await startRecording()
     }
 
     func stopReplay() async {
+        previewCompletionTask?.cancel()
+        previewCompletionTask = nil
         await replay?.stop()
+        previewPlaying = false
         notice = isRecording ? "다시 듣기를 멈췄습니다. 녹음은 계속됩니다." : "재생을 멈췄습니다."
-    }
-
-    func returnToLive() async {
-        await replay?.stop()
-        await replay?.returnToLive()
-        notice = "현재 녹음 위치로 돌아왔습니다."
-    }
-
-    func addBookmark() async {
-        guard let store else { return }
-        do {
-            var prior: [Annotation] = []
-            if let active = session?.activeAnnotationRevisionID {
-                let existing = try await store.read(AnnotationRevision.self, relativePath: "revisions/\(active).json")
-                prior = existing.annotations
-            }
-            prior.append(Annotation(kind: .bookmark, startMs: elapsedMs, content: "북마크"))
-            try await commitAnnotations(prior)
-            notice = "\(Self.clock(elapsedMs))에 북마크를 저장했습니다."
-        } catch { notice = "북마크를 저장하지 못했습니다: \(error.localizedDescription)" }
-    }
-
-    func openSessionFolder() {
-        guard let store else { return }
-        Task {
-            let directory = await store.sessionDirectory
-            _ = NSWorkspace.shared.open(directory)
-        }
     }
 
     func saveAPIKey() {
@@ -438,7 +464,7 @@ final class AppModel: ObservableObject {
 
     func importAudio() async {
         guard !isBusy, !captureActive else { return }
-        guard let rootDirectory else { notice = "먼저 저장 폴더를 선택해 주세요."; return }
+        guard let rootDirectory else { notice = "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."; return }
         let panel = NSOpenPanel()
         panel.title = "로컬 오디오 가져오기"
         panel.allowedContentTypes = [.audio]
@@ -472,7 +498,7 @@ final class AppModel: ObservableObject {
             store = newStore
             replay = ReplayEngine(spans: session?.tracks ?? [], sessionDirectory: await newStore.sessionDirectory)
             elapsedMs = durationMs
-            notice = hasAPIKey ? "원본을 세션 폴더로 복사했습니다. OpenAI 처리를 시작할 수 있습니다." : "원본을 세션 폴더로 복사했습니다. 처리하려면 OpenAI API 키를 설정해 주세요."
+            notice = hasAPIKey ? "오디오를 앱 내부에 보관했습니다. OpenAI 처리를 시작할 수 있습니다." : "오디오를 앱 내부에 보관했습니다. 처리하려면 OpenAI API 키를 설정해 주세요."
             showResults = true
         } catch { notice = "오디오를 가져오지 못했습니다: \(error.localizedDescription)" }
     }
@@ -587,10 +613,9 @@ final class AppModel: ObservableObject {
                 $0.processingStatus = transcriptIsComplete ? .ready : .partial
             }
             summary = newSummary
-            try await writeExports()
             if newTranscript.coverage.isComplete {
                 processingProgress = "완료"
-                resultNotice = "OpenAI API 전사와 요약을 완료했습니다. 결과는 선택한 로컬 폴더에 저장했습니다."
+                resultNotice = "OpenAI API 전사와 요약을 완료했습니다. 파일이 필요하면 결과물 내보내기를 선택하세요."
             } else {
                 processingProgress = "부분 완료"
                 resultNotice = "OpenAI API 처리를 저장했습니다. 오디오 공백 \(newTranscript.coverage.failedRanges.count)개가 결과에 표시됩니다."
@@ -609,9 +634,18 @@ final class AppModel: ObservableObject {
 
     func copyResult(_ kind: ExportKind) {
         do {
-            let content = try exportContent(kind)
-            guard MarkdownExporter().copyMarkdownToPasteboard(content) else { throw ListenUpError.writeFailed("pasteboard") }
-            notice = "Markdown과 서식 있는 내용을 클립보드에 복사했습니다."
+            let exporter = MarkdownExporter()
+            switch kind {
+            case .transcript:
+                guard let transcript else { throw ListenUpError.missingReference("transcript") }
+                let content = try exporter.plainTranscript(transcript)
+                guard exporter.copyPlainTextToPasteboard(content) else { throw ListenUpError.writeFailed("pasteboard") }
+                notice = "시간 정보 없이 전체 전사 텍스트를 클립보드에 복사했습니다."
+            case .summary, .combined:
+                let content = try exportContent(kind)
+                guard exporter.copyMarkdownToPasteboard(content) else { throw ListenUpError.writeFailed("pasteboard") }
+                notice = "Markdown과 서식 있는 내용을 클립보드에 복사했습니다."
+            }
         } catch { notice = "복사하지 못했습니다: \(error.localizedDescription)" }
     }
 
@@ -780,22 +814,12 @@ final class AppModel: ObservableObject {
                 $0.providerConfiguration = providerConfiguration
             }
             summary = newSummary
-            try await writeExports()
             processingProgress = transcript.coverage.isComplete ? "완료" : "부분 완료"
             resultNotice = "현재 용도, 교정본, 제외 구간으로 OpenAI 요약을 생성했습니다."
         } catch {
             processingProgress = ""
             resultNotice = friendlyMessage(for: error)
         }
-    }
-
-    func writeExports() async throws {
-        guard let store, let session else { throw ListenUpError.missingReference("session") }
-        let directory = await store.sessionDirectory.appendingPathComponent("exports", isDirectory: true)
-        let exporter = MarkdownExporter()
-        if let transcript { _ = try exporter.write(try exporter.transcript(transcript, title: session.title), to: directory, filename: "transcript") }
-        if let summary { _ = try exporter.write(exporter.summary(summary, title: session.title), to: directory, filename: "summary") }
-        if transcript != nil { _ = try exporter.write(try exportContent(.combined), to: directory, filename: "listenup") }
     }
 
     private func exportContent(_ kind: ExportKind) throws -> String {
@@ -969,6 +993,9 @@ final class AppModel: ObservableObject {
     }
 
     private func resetSessionPresentation() {
+        previewCompletionTask?.cancel()
+        previewCompletionTask = nil
+        previewPlaying = false
         transcript = nil
         summary = nil
         transcriptDraft = ""
@@ -977,6 +1004,42 @@ final class AppModel: ObservableObject {
         processingProgress = ""
         resultNotice = ""
         showResults = false
+    }
+
+    var recordingDurationMs: Int64 {
+        session?.tracks.map { $0.sessionStartMs + $0.durationMs }.max() ?? elapsedMs
+    }
+
+    var recordingLevelIsLow: Bool {
+        let levels = expectedRecordingPeakLevels
+        return !levels.isEmpty && levels.contains { $0 < 0.12 }
+    }
+
+    private var expectedRecordingPeakLevels: [Float] {
+        guard let source = session?.inputSource else { return [] }
+        switch source {
+        case .microphone: return [microphonePeakLevel]
+        case .systemAudio: return [systemAudioPeakLevel]
+        case .microphoneAndSystem: return [microphonePeakLevel, systemAudioPeakLevel]
+        case .importedFile: return []
+        }
+    }
+
+    private func resetRecordingLevels() {
+        microphoneLevel = 0
+        systemAudioLevel = 0
+        microphonePeakLevel = 0
+        systemAudioPeakLevel = 0
+    }
+
+    private func updateMicrophoneLevel(_ value: Float) {
+        microphoneLevel = max(value, microphoneLevel * 0.72)
+        microphonePeakLevel = max(microphonePeakLevel, value)
+    }
+
+    private func updateSystemAudioLevel(_ value: Float) {
+        systemAudioLevel = max(value, systemAudioLevel * 0.72)
+        systemAudioPeakLevel = max(systemAudioPeakLevel, value)
     }
 
     private var selectedProviderConfiguration: ProviderConfiguration {
@@ -1071,32 +1134,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func restoreRootDirectory() {
-        guard let data = UserDefaults.standard.data(forKey: "ListenUpRootBookmark") else { return }
-        var stale = false
-        if let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
-            rootDirectory = url
-            _ = url.startAccessingSecurityScopedResource()
-            scopedRootURL = url
-            if stale { saveRootDirectory(url) }
+    private static func prepareInternalSessionsDirectory() -> URL? {
+        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
         }
-    }
-
-    private func saveRootDirectory(_ url: URL) {
-        if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: "ListenUpRootBookmark")
+        let directory = applicationSupport
+            .appendingPathComponent("ListenUp", isDirectory: true)
+            .appendingPathComponent("Sessions", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory
+        } catch {
+            return nil
         }
-    }
-
-    private static func isScreenCapturePermissionError(_ error: Error) -> Bool {
-        let value = error as NSError
-        let details = "\(value.domain) \(value.localizedDescription)".lowercased()
-        return details.contains("tcc")
-            || details.contains("permission")
-            || details.contains("denied")
-            || details.contains("declined")
-            || details.contains("거절")
-            || details.contains("권한")
     }
 
     static func clock(_ milliseconds: Int64) -> String {

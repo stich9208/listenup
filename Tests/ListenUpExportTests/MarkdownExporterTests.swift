@@ -15,6 +15,25 @@ final class MarkdownExporterTests: XCTestCase {
         XCTAssertFalse(sum.contains("Revision:")); XCTAssertFalse(sum.contains("근거:")); XCTAssertFalse(sum.contains("s1"))
     }
 
+    func testPlainTranscriptContainsOnlyDictationText() throws {
+        let transcript = TranscriptRevision(
+            id: "transcript-plain",
+            segments: [
+                TranscriptSegment(id: "s2", text: " 다음 문장입니다. ", startMs: 5_000, endMs: 10_000, requestID: "r"),
+                TranscriptSegment(id: "s1", text: "첫 문장입니다.", startMs: 0, endMs: 5_000, requestID: "r"),
+            ],
+            coverage: Coverage(startMs: 0, endMs: 10_000),
+            modelID: "fixture",
+            configurationHash: "fixture"
+        )
+
+        let text = try MarkdownExporter().plainTranscript(transcript)
+
+        XCTAssertEqual(text, "첫 문장입니다. 다음 문장입니다.")
+        XCTAssertFalse(text.contains("00:00"))
+        XCTAssertFalse(text.contains("#"))
+    }
+
     func testWriteUsesSafeNameAndPreservesModifiedExport() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -56,6 +75,68 @@ final class MarkdownExporterTests: XCTestCase {
                 if let detail = item.detail { XCTAssertTrue(markdown.contains(detail)) }
             }
         }
+    }
+
+    func testLectureSummaryIsCappedAndHidesReviewQuestions() {
+        func items(_ prefix: String, count: Int) -> [SummaryItem] {
+            (0..<count).map { SummaryItem(text: "\(prefix) \($0)", evidenceSegmentIDs: ["s\($0)"]) }
+        }
+        let sections = SummarySections(
+            overview: items("개요", count: 4),
+            topics: items("주제", count: 15),
+            concepts: items("개념", count: 15),
+            examples: items("예시", count: 9),
+            emphasizedPoints: items("핵심", count: 9),
+            reviewQuestions: [SummaryItem(text: "표시하면 안 되는 질문", evidenceSegmentIDs: ["s0"], generated: true)],
+            uncertainties: items("불확실", count: 4)
+        )
+        let revision = SummaryRevision(id: "summary", purpose: .lecture, sourceTranscriptRevisionID: "transcript", annotationRevisionID: "none", promptVersion: "test", modelID: "test", sections: sections, inputHash: "hash")
+        let exporter = MarkdownExporter()
+        let document = exporter.summaryDocument(revision)
+        let markdown = exporter.summary(revision)
+
+        XCTAssertEqual(document.sections.first(where: { $0.title == "강의 개요" })?.items.count, 2)
+        XCTAssertEqual(document.sections.first(where: { $0.title == "챕터별 요약" })?.items.count, 12)
+        XCTAssertEqual(document.sections.first(where: { $0.title == "핵심 개념" })?.items.count, 12)
+        XCTAssertEqual(document.sections.first(where: { $0.title == "대표 예시와 계산" })?.items.count, 6)
+        XCTAssertEqual(document.sections.first(where: { $0.title == "꼭 기억할 내용" })?.items.count, 6)
+        XCTAssertNil(document.sections.first(where: { $0.title == "불확실한 내용" }))
+        XCTAssertEqual(document.sections.first(where: { $0.title == "챕터별 요약" })?.numbered, true)
+        XCTAssertFalse(markdown.contains("복습 질문"))
+        XCTAssertFalse(markdown.contains("표시하면 안 되는 질문"))
+        XCTAssertFalse(markdown.contains("불확실한 내용"))
+    }
+
+    func testStructuredLectureNotesRenderTopicHeadingsAndNestedBullets() {
+        let sections = SummarySections(lectureNotes: [
+            StudyNoteSection(title: "학습 내용", items: [
+                StudyNoteItem(text: "R 작업폴더와 작업공간 설정 방법", evidenceSegmentIDs: ["s1"])
+            ]),
+            StudyNoteSection(title: "R 작업폴더 (Working Directory)", items: [
+                StudyNoteItem(
+                    text: "`setwd(\"경로\")`: 작업폴더 지정",
+                    children: [
+                        StudyNoteItem(text: "예시: `setwd(\"C:/R_test\")`", evidenceSegmentIDs: ["s2"]),
+                        StudyNoteItem(text: "R 세션이 닫히기 전까지 유지됨", evidenceSegmentIDs: ["s3"])
+                    ],
+                    evidenceSegmentIDs: ["s1"]
+                )
+            ])
+        ])
+        let revision = SummaryRevision(id: "summary", purpose: .lecture, sourceTranscriptRevisionID: "transcript", annotationRevisionID: "none", promptVersion: "test", modelID: "test", sections: sections, inputHash: "hash")
+
+        let exporter = MarkdownExporter()
+        let document = exporter.summaryDocument(revision)
+        let markdown = exporter.summary(revision)
+
+        XCTAssertEqual(document.sections.map(\.title), ["학습 내용", "R 작업폴더 (Working Directory)"])
+        XCTAssertEqual(document.sections.last?.items.first?.children.count, 2)
+        XCTAssertTrue(markdown.contains("### 학습 내용"))
+        XCTAssertTrue(markdown.contains("### R 작업폴더 (Working Directory)"))
+        XCTAssertTrue(markdown.contains("- `setwd(\"경로\")`: 작업폴더 지정"))
+        XCTAssertTrue(markdown.contains("  - 예시: `setwd(\"C:/R_test\")`"))
+        XCTAssertFalse(markdown.contains("챕터별 요약"))
+        XCTAssertFalse(markdown.contains("복습 질문"))
     }
 
     func testLongExportRetainsAllText() throws {

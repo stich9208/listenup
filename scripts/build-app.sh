@@ -5,13 +5,13 @@ script_dir="${0:A:h}"
 repo_dir="${script_dir:h}"
 configuration="${1:-Release}"
 configuration="${configuration:l}"
-products_dir="${repo_dir}/.build/arm64-apple-macosx/${configuration}"
 
 cd "${repo_dir}"
 swift build \
     --configuration "${configuration}" \
     --disable-sandbox \
     -j 2
+products_dir="$(swift build --show-bin-path --configuration "${configuration}")"
 
 [[ -x "${products_dir}/ListenUpApp" ]] || { echo "Missing ListenUpApp build product" >&2; exit 1; }
 

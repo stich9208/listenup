@@ -25,7 +25,7 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>강의와 회의의 마이크 소리를 사용자가 선택한 로컬 폴더에 녹음합니다.</string>
+    <string>강의와 회의의 마이크 소리를 녹음하고 앱 내부에 안전하게 보관하기 위해 마이크 접근 권한이 필요합니다.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>사용자가 선택한 앱의 소리를 로컬에 녹음하기 위해 화면 및 시스템 오디오 접근 권한이 필요합니다.</string>
     <key>NSPrincipalClass</key>
