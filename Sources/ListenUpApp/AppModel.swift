@@ -10,6 +10,176 @@ import ListenUpDomain
 import ListenUpExport
 import ListenUpStorage
 
+private enum FinalizedCaptureEvent: Sendable {
+    case chunk(url: URL, track: SourceTrack, sessionStartMs: Int64)
+    case failure(String)
+}
+
+/// Nonisolated capture callbacks enter here. The relay schedules one
+/// MainActor consumer for a contiguous FIFO batch, never one task per chunk.
+private final class FinalizedCaptureIngress: @unchecked Sendable {
+    let relay = FinalizedEventRelay<FinalizedCaptureEvent>()
+    var startConsumer: (@Sendable () -> Void)?
+
+    func submit(_ event: FinalizedCaptureEvent) {
+        relay.submit(event) { [weak self] in self?.startConsumer?() }
+    }
+}
+
+/// Immutable ownership for one recording. Capture callbacks retain this rather
+/// than AppModel, so late finalization can only reach its original store.
+private final class CaptureGeneration: @unchecked Sendable {
+    let id = UUID()
+    let store: SessionStore
+    let ingress = FinalizedCaptureIngress()
+    let meter = CaptureMeterRelay()
+    let terminalFailure = CaptureTerminalFailureSignal()
+
+    init(store: SessionStore) { self.store = store }
+}
+
+/// Source callbacks run outside the MainActor. This lock-protected bit gives
+/// startRecording a synchronous happens-before edge before it awaits FIFO work.
+final class CaptureTerminalFailureSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signaled = false
+
+    func signal() { lock.withLock { signaled = true } }
+    var isSignaled: Bool { lock.withLock { signaled } }
+}
+
+/// Terminal ownership is independent from the presentation busy flag. A source
+/// can fail while `startRecording()` is suspended; that intent must survive
+/// until the start catch performs the generation's single shutdown.
+private enum CaptureTerminalOwner {
+    case starting(CaptureGeneration)
+    case stopping(CaptureGeneration)
+    case failing(CaptureGeneration)
+    case persistenceBlocked(CaptureGeneration)
+
+    func owns(_ generation: CaptureGeneration) -> Bool {
+        switch self {
+        case let .starting(value), let .stopping(value), let .failing(value), let .persistenceBlocked(value): return value === generation
+        }
+    }
+
+    func isFailure(for generation: CaptureGeneration) -> Bool {
+        if case let .failing(value) = self { return value === generation }
+        return false
+    }
+}
+
+/// Production durable-terminal seam. AppModel and its tests use the same
+/// coordinator so interrupted persistence cannot be reordered after release.
+@MainActor
+final class CaptureTerminalCoordinator {
+    private(set) var retainedGenerationID: UUID?
+    private(set) var terminalPersistenceBlocked = false
+
+    func claim(generationID: UUID) { retainedGenerationID = generationID }
+
+    func block(generationID: UUID) {
+        retainedGenerationID = generationID
+        terminalPersistenceBlocked = true
+    }
+
+    func persistInterrupted(_ store: SessionStore, failureMs: Int64? = nil) async throws -> Session {
+        do {
+            return try await store.updateSession { value in
+                value.captureStatus = .interrupted
+                if let failureMs, value.gaps.last?.startMs != failureMs {
+                    value.gaps.append(Gap(startMs: failureMs, reason: .unknown))
+                }
+            }
+        } catch {
+            terminalPersistenceBlocked = true
+            throw error
+        }
+    }
+
+    func release() { guard !terminalPersistenceBlocked else { return }; retainedGenerationID = nil }
+}
+
+private final class MeterRelaySlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var relay: CaptureMeterRelay?
+
+    func set(_ relay: CaptureMeterRelay?) { lock.withLock { self.relay = relay } }
+    func setActive(_ active: Bool) { lock.withLock { relay }?.setActive(active) }
+}
+
+private final class PresentationActivityGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+
+    func setActive(_ active: Bool) { lock.withLock { self.active = active } }
+    var isActive: Bool { lock.withLock { active } }
+}
+
+/// Pure stop-time calculation kept separate so elapsed freezing is verifiable
+/// without a microphone, ScreenCaptureKit permission, or a running app.
+struct CaptureElapsedFreeze {
+    static func milliseconds(recordingBeganAt: Date?, captureQuiescedAt: Date, fallback: Int64) -> Int64 {
+        guard let recordingBeganAt else { return fallback }
+        return max(0, Int64(captureQuiescedAt.timeIntervalSince(recordingBeganAt) * 1_000))
+    }
+}
+
+/// Owns fast-changing recording UI values. Keeping it separate from AppModel
+/// prevents a meter tick from invalidating the setup, result, and export views.
+@MainActor
+final class RecordingPresentationState: ObservableObject {
+    @Published private(set) var elapsedMs: Int64 = 0
+    @Published private(set) var microphoneLevel: Float = 0
+    @Published private(set) var systemAudioLevel: Float = 0
+    @Published private(set) var microphonePeakLevel: Float = 0
+    @Published private(set) var systemAudioPeakLevel: Float = 0
+
+    private var presentationIsActive = true
+
+    func reset() {
+        elapsedMs = 0
+        microphoneLevel = 0
+        systemAudioLevel = 0
+        microphonePeakLevel = 0
+        systemAudioPeakLevel = 0
+    }
+
+    /// Stop hides live activity but intentionally retains peaks for the result
+    /// warning. `reset()` is only used when a new recording begins.
+    func clearLiveLevels() {
+        microphoneLevel = 0
+        systemAudioLevel = 0
+    }
+
+    func apply(_ snapshot: CaptureMeterSnapshot) {
+        guard presentationIsActive else { return }
+        microphoneLevel = snapshot.microphoneLevel
+        systemAudioLevel = snapshot.systemAudioLevel
+        microphonePeakLevel = snapshot.microphonePeak
+        systemAudioPeakLevel = snapshot.systemAudioPeak
+    }
+
+    func freeze(_ snapshot: CaptureMeterSnapshot, elapsedMs: Int64) {
+        self.elapsedMs = elapsedMs
+        microphoneLevel = 0
+        systemAudioLevel = 0
+        microphonePeakLevel = snapshot.microphonePeak
+        systemAudioPeakLevel = snapshot.systemAudioPeak
+    }
+
+    func publishElapsed(_ milliseconds: Int64) {
+        guard presentationIsActive else { return }
+        elapsedMs = milliseconds
+    }
+
+    func setPresentationActive(_ active: Bool, elapsedMs: Int64) {
+        presentationIsActive = active
+        guard active else { return }
+        self.elapsedMs = elapsedMs
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var title = ""
@@ -24,7 +194,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var screenCapturePermissionBlocked = false
     @Published var selectedApplicationID: String?
     @Published var session: Session?
-    @Published var elapsedMs: Int64 = 0
+    let recordingPresentation = RecordingPresentationState()
+    @Published var recordingQualityProfile = RecordingQualityProfile(rawValue: UserDefaults.standard.string(forKey: "ListenUpRecordingQualityProfile") ?? "") ?? .transcriptionOptimized {
+        didSet { UserDefaults.standard.set(recordingQualityProfile.rawValue, forKey: "ListenUpRecordingQualityProfile") }
+    }
     @Published var notice = ""
     /// Setup guidance remains on the recording screen; processing feedback is kept
     /// with the result so changing tabs cannot hide an error the user is waiting on.
@@ -48,11 +221,10 @@ final class AppModel: ObservableObject {
     @Published var exclusionEndSeconds = 30
     @Published var editingExclusionID: UUID?
     @Published private(set) var captureActive = false
+    /// A failed required terminal write means the session's durable state is
+    /// unknown. Do not allow another capture to overwrite that evidence.
+    @Published private(set) var terminalPersistenceBlocked = false
     @Published var processingProgress = ""
-    @Published private(set) var microphoneLevel: Float = 0
-    @Published private(set) var systemAudioLevel: Float = 0
-    @Published private(set) var microphonePeakLevel: Float = 0
-    @Published private(set) var systemAudioPeakLevel: Float = 0
     @Published private(set) var previewPlaying = false
 
     private var store: SessionStore?
@@ -61,11 +233,17 @@ final class AppModel: ObservableObject {
     private var replay: ReplayEngine?
     private var timer: Timer?
     private var recordingBeganAt: Date?
-    private var pendingChunks: [(URL, SourceTrack, Int64?)] = []
-    private var isRegisteringChunk = false
+    private var frozenElapsedMs: Int64 = 0
+    private var frozenCaptureMeterSnapshot: CaptureMeterSnapshot?
+    private let presentationActivityGate = PresentationActivityGate()
+    private let meterRelaySlot = MeterRelaySlot()
+    private var activeGeneration: CaptureGeneration?
     private var captureFailureMessage: String?
+    private var terminalOwner: CaptureTerminalOwner?
+    private let terminalCoordinator = CaptureTerminalCoordinator()
     private let recordingIndicator = RecordingIndicatorController()
     private var previewCompletionTask: Task<Void, Never>?
+    nonisolated(unsafe) private var activityObservers: [NSObjectProtocol] = []
 
     init() {
         hasAPIKey = OpenAIKeychain.load()?.isEmpty == false
@@ -74,7 +252,31 @@ final class AppModel: ObservableObject {
         if rootDirectory == nil {
             notice = "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."
         }
+        let center = NotificationCenter.default
+        let activityGate = presentationActivityGate
+        let meterRelaySlot = meterRelaySlot
+        activityObservers = [
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                activityGate.setActive(false)
+                // This runs synchronously on notification delivery, before a
+                // MainActor task can be created by another sample callback.
+                meterRelaySlot.setActive(false)
+                Task { @MainActor in
+                    self?.recordingPresentation.setPresentationActive(false, elapsedMs: 0)
+                }
+            },
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                activityGate.setActive(true)
+                meterRelaySlot.setActive(true)
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.recordingPresentation.setPresentationActive(true, elapsedMs: self.authoritativeElapsedMs)
+                }
+            },
+        ]
     }
+
+    deinit { activityObservers.forEach(NotificationCenter.default.removeObserver) }
 
     var isRecording: Bool { captureActive }
     var selectedApplication: CaptureApplication? {
@@ -129,7 +331,10 @@ final class AppModel: ObservableObject {
     }
 
     func startRecording() async {
-        guard !isBusy, !isRecording else { return }
+        guard !isBusy, !isRecording, !terminalPersistenceBlocked else {
+            if terminalPersistenceBlocked { notice = "이전 녹음의 중단 상태를 저장하지 못했습니다. 앱을 다시 시작한 뒤 세션을 복구해 주세요." }
+            return
+        }
         guard let rootDirectory else { notice = "앱 내부 저장소를 준비하지 못했습니다. 앱을 다시 실행해 주세요."; return }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { notice = "녹음 제목을 입력해 주세요."; return }
@@ -139,9 +344,12 @@ final class AppModel: ObservableObject {
         }
 
         isBusy = true
+        terminalOwner = nil
         resetSessionPresentation()
         captureFailureMessage = nil
-        resetRecordingLevels()
+        recordingPresentation.reset()
+        frozenElapsedMs = 0
+        frozenCaptureMeterSnapshot = nil
         var newSession = Session(
             title: cleanTitle,
             purpose: purpose,
@@ -152,11 +360,32 @@ final class AppModel: ObservableObject {
                 keywords: keywords.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
                 notes: notes
             ),
-            providerConfiguration: selectedProviderConfiguration
+            providerConfiguration: selectedProviderConfiguration,
+            recordingQualityProfile: recordingQualityProfile
         )
+        var generation: CaptureGeneration?
         do {
             let newStore = try SessionStore.create(in: rootDirectory, session: newSession)
             store = newStore
+            let newGeneration = CaptureGeneration(store: newStore)
+            newGeneration.meter.setActive(presentationActivityGate.isActive)
+            newGeneration.meter.onSnapshot = { [weak self, weak newGeneration] snapshot in
+                Task { @MainActor in
+                    guard let self, let newGeneration, self.activeGeneration === newGeneration else { return }
+                    self.recordingPresentation.apply(snapshot)
+                }
+            }
+            newGeneration.ingress.startConsumer = { [weak self, weak newGeneration] in
+                Task { @MainActor in
+                    guard let self, let newGeneration else { return }
+                    await self.consumeFinalizedEvents(for: newGeneration)
+                }
+            }
+            generation = newGeneration
+            activeGeneration = newGeneration
+            terminalOwner = .starting(newGeneration)
+            terminalCoordinator.claim(generationID: newGeneration.id)
+            meterRelaySlot.set(newGeneration.meter)
             let directory = await newStore.sessionDirectory
             let microphoneDirectory = directory.appendingPathComponent("audio/microphone", isDirectory: true)
             let systemDirectory = directory.appendingPathComponent("audio/system", isDirectory: true)
@@ -164,33 +393,37 @@ final class AppModel: ObservableObject {
 
             if requiresMicrophone {
                 let capture = MicrophoneCapture()
-                capture.onFinalizedTimedChunk = { [weak self] url, sessionStartMs in
-                    Task { @MainActor in self?.enqueueChunk(url, track: .microphone, sessionStartMs: sessionStartMs) }
+                capture.onFinalizedTimedChunk = { url, sessionStartMs in
+                    newGeneration.ingress.submit(.chunk(url: url, track: .microphone, sessionStartMs: sessionStartMs))
                 }
-                capture.onLevel = { [weak self] level in
-                    Task { @MainActor in self?.updateMicrophoneLevel(level) }
+                capture.onLevel = { level in
+                    newGeneration.meter.record(level, from: .microphone)
                 }
-                capture.onError = { [weak self] error in
-                    Task { @MainActor in await self?.handleCaptureFailure(error) }
+                capture.onError = { error in
+                    newGeneration.terminalFailure.signal()
+                    newGeneration.ingress.submit(.failure(error.localizedDescription))
                 }
-                try capture.start(directory: microphoneDirectory)
+                try capture.start(directory: microphoneDirectory, profile: recordingQualityProfile)
                 microphone = capture
+                recordingBeganAt = Date()
             }
 
             if requiresSystemAudio {
                 let capture = SystemAudioRecorder()
-                capture.onFinalizedTimedChunk = { [weak self] url, sessionStartMs in
-                    Task { @MainActor in self?.enqueueChunk(url, track: .system, sessionStartMs: sessionStartMs) }
+                capture.onFinalizedTimedChunk = { url, sessionStartMs in
+                    newGeneration.ingress.submit(.chunk(url: url, track: .system, sessionStartMs: sessionStartMs))
                 }
-                capture.onLevel = { [weak self] level in
-                    Task { @MainActor in self?.updateSystemAudioLevel(level) }
+                capture.onLevel = { level in
+                    newGeneration.meter.record(level, from: .systemAudio)
                 }
-                capture.onError = { [weak self] error in
-                    Task { @MainActor in await self?.handleCaptureFailure(error) }
+                capture.onError = { error in
+                    newGeneration.terminalFailure.signal()
+                    newGeneration.ingress.submit(.failure(error.localizedDescription))
                 }
+                systemAudio = capture
                 do {
-                    try await capture.start(directory: systemDirectory, application: selectedApplication)
-                    systemAudio = capture
+                    try await capture.start(directory: systemDirectory, profile: recordingQualityProfile, application: selectedApplication)
+                    if recordingBeganAt == nil { recordingBeganAt = Date() }
                 } catch {
                     microphone?.stop()
                     microphone = nil
@@ -198,55 +431,102 @@ final class AppModel: ObservableObject {
                 }
             }
 
+            if newGeneration.terminalFailure.isSignaled || terminalOwner?.isFailure(for: newGeneration) == true { throw CancellationError() }
             newSession.captureStatus = .recording
             session = try await newStore.updateSession { stored in stored.captureStatus = .recording }
+            // A callback can race this durable transition; immediately turn
+            // that same store into interrupted in the catch below.
+            if newGeneration.terminalFailure.isSignaled || terminalOwner?.isFailure(for: newGeneration) == true { throw CancellationError() }
+            terminalOwner = nil
             replay = ReplayEngine(sessionDirectory: directory)
-            recordingBeganAt = Date()
-            elapsedMs = 0
+            // Timing begins when the first source starts, not after a slower
+            // second source or the session-status write completes.
+            if recordingBeganAt == nil { recordingBeganAt = Date() }
+            frozenElapsedMs = 0
+            frozenCaptureMeterSnapshot = nil
             startTimer()
             recordingIndicator.show()
             notice = "녹음 중입니다. 녹음을 끝낸 뒤 OpenAI API로 전사와 요약을 진행할 수 있습니다."
         } catch {
-            microphone?.stop()
+            let failedGeneration = generation
+            if let failedGeneration { terminalOwner = .failing(failedGeneration) }
+            let failedMicrophone = microphone
+            let failedSystemAudio = systemAudio
             microphone = nil
-            try? await systemAudio?.stop()
             systemAudio = nil
+            failedMicrophone?.stop()
+            var captureQuiescedAt = (error as? SystemAudioRecorderStopError)?.captureQuiescedAt ?? Date()
+            if let failedSystemAudio, !(error is SystemAudioRecorderStopError) {
+                do { captureQuiescedAt = try await failedSystemAudio.stopAndWaitForQuiescence() }
+                catch let terminal as SystemAudioRecorderStopError { captureQuiescedAt = terminal.captureQuiescedAt }
+                catch { captureQuiescedAt = Date() }
+            }
+            var durableInterruptedSession: Session?
+            if let failedGeneration {
+                await failedGeneration.ingress.relay.drain()
+                // Freeze the real capture boundary before any interrupted
+                // persistence and before start eligibility is released.
+                freezeCapturePresentation(at: captureQuiescedAt, generation: failedGeneration)
+                do {
+                    durableInterruptedSession = try await terminalCoordinator.persistInterrupted(failedGeneration.store)
+                } catch {
+                    terminalPersistenceBlocked = terminalCoordinator.terminalPersistenceBlocked
+                    terminalOwner = .persistenceBlocked(failedGeneration)
+                    notice = "녹음 시작이 중단되었지만 중단 상태를 저장하지 못했습니다: \(error.localizedDescription)"
+                }
+            }
+            microphone = nil
             captureActive = false
             recordingIndicator.hide()
             newSession.captureStatus = .interrupted
-            session = newSession
-            notice = "녹음을 시작하지 못했습니다: \(error.localizedDescription)"
+            session = durableInterruptedSession ?? newSession
+            if let failedGeneration, activeGeneration === failedGeneration {
+                activeGeneration = nil
+                meterRelaySlot.set(nil)
+            }
+            if !terminalPersistenceBlocked { terminalOwner = nil; terminalCoordinator.release() }
+            if !terminalPersistenceBlocked { notice = "녹음을 시작하지 못했습니다: \(error.localizedDescription)" }
         }
         isBusy = false
     }
 
     func stopRecording() async {
-        guard captureActive, !isBusy else { return }
+        guard captureActive, !isBusy, let generation = activeGeneration else { return }
         isBusy = true
+        terminalOwner = .stopping(generation)
         captureActive = false
         recordingIndicator.hide()
         timer?.invalidate()
         timer = nil
-        microphone?.stop()
+        let stoppingMicrophone = microphone
+        let stoppingSystemAudio = systemAudio
         microphone = nil
-        do { try await systemAudio?.stop() }
-        catch { captureFailureMessage = "시스템 오디오 종료: \(error.localizedDescription)" }
         systemAudio = nil
-        await Task.yield()
-        await waitForPendingChunks()
-        if let store {
+        stoppingMicrophone?.stop()
+        var captureQuiescedAt = Date()
+        do {
+            if let stoppingSystemAudio {
+                captureQuiescedAt = try await stoppingSystemAudio.stopAndWaitForQuiescence()
+            }
+        }
+        catch {
+            if let terminal = error as? SystemAudioRecorderStopError { captureQuiescedAt = terminal.captureQuiescedAt }
+            captureFailureMessage = "시스템 오디오 종료: \(error.localizedDescription)"
+        }
+        freezeCapturePresentation(at: captureQuiescedAt)
+        // Both capture implementations have now quiesced their input queues.
+        // This is an acknowledgement barrier, not a scheduling hint: every
+        // finalized file and capture error accepted by the FIFO is registered
+        // before capture status may become stopped.
+        await generation.ingress.relay.drain()
+        if activeGeneration === generation {
             do {
                 if let captureFailureMessage {
-                    let failureMs = elapsedMs
-                    session = try await store.updateSession { value in
-                        value.captureStatus = .interrupted
-                        if value.gaps.last?.startMs != failureMs {
-                            value.gaps.append(Gap(startMs: failureMs, reason: .unknown))
-                        }
-                    }
+                    let failureMs = authoritativeElapsedMs
+                    session = try await terminalCoordinator.persistInterrupted(generation.store, failureMs: failureMs)
                     notice = "녹음은 끝났지만 오디오 저장 오류가 있었습니다: \(captureFailureMessage)"
                 } else {
-                    session = try await store.updateSession { value in
+                    session = try await generation.store.updateSession { value in
                         value.captureStatus = .stopped
                         value.processingStatus = .notStarted
                     }
@@ -255,14 +535,24 @@ final class AppModel: ObservableObject {
                         : "녹음을 저장했습니다. OpenAI API 키를 설정한 뒤 전사와 요약을 시작할 수 있습니다."
                 }
             } catch {
+                terminalCoordinator.block(generationID: generation.id)
+                terminalPersistenceBlocked = terminalCoordinator.terminalPersistenceBlocked
+                terminalOwner = .persistenceBlocked(generation)
                 notice = "녹음은 끝났지만 세션 정보를 확정하지 못했습니다: \(error.localizedDescription)"
+                resultNotice = "녹음 상태를 저장하지 못했습니다. 새 녹음은 차단되어 있습니다: \(error.localizedDescription)"
             }
         }
-        microphoneLevel = 0
-        systemAudioLevel = 0
-        resultNotice = ""
+        recordingPresentation.clearLiveLevels()
+        // Keep the blocking persistence failure visible after switching to
+        // the result screen. Successful stops still clear an older notice.
+        if !terminalPersistenceBlocked { resultNotice = "" }
         processingProgress = ""
         showResults = true
+        if activeGeneration === generation {
+            activeGeneration = nil
+            meterRelaySlot.set(nil)
+        }
+        if !terminalPersistenceBlocked { terminalOwner = nil; terminalCoordinator.release() }
         isBusy = false
     }
 
@@ -497,7 +787,7 @@ final class AppModel: ObservableObject {
             session = try await newStore.updateSession { $0 = importedSession }
             store = newStore
             replay = ReplayEngine(spans: session?.tracks ?? [], sessionDirectory: await newStore.sessionDirectory)
-            elapsedMs = durationMs
+            recordingPresentation.publishElapsed(durationMs)
             notice = hasAPIKey ? "오디오를 앱 내부에 보관했습니다. OpenAI 처리를 시작할 수 있습니다." : "오디오를 앱 내부에 보관했습니다. 처리하려면 OpenAI API 키를 설정해 주세요."
             showResults = true
         } catch { notice = "오디오를 가져오지 못했습니다: \(error.localizedDescription)" }
@@ -543,7 +833,7 @@ final class AppModel: ObservableObject {
             title = session?.title ?? title
             purpose = session?.purpose ?? purpose
             replay = ReplayEngine(spans: session?.tracks ?? [], sessionDirectory: directory)
-            elapsedMs = session?.tracks.map { $0.sessionStartMs + $0.durationMs }.max() ?? 0
+            recordingPresentation.publishElapsed(session?.tracks.map { $0.sessionStartMs + $0.durationMs }.max() ?? 0)
             notice = recovery.orphanedAudioFiles.isEmpty ? "세션을 열었습니다." : "세션을 열었습니다. 등록되지 않은 오디오 \(recovery.orphanedAudioFiles.count)개는 복구 대상으로 표시했습니다."
             showResults = true
         } catch { notice = "세션을 열지 못했습니다: \(error.localizedDescription)" }
@@ -917,26 +1207,27 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func enqueueChunk(_ url: URL, track: SourceTrack, sessionStartMs: Int64? = nil) {
-        pendingChunks.append((url, track, sessionStartMs))
-        guard !isRegisteringChunk else { return }
-        isRegisteringChunk = true
-        Task { @MainActor in
-            while !pendingChunks.isEmpty {
-                let next = pendingChunks.removeFirst()
-                await registerChunk(next.0, track: next.1, sessionStartMs: next.2)
+    private func consumeFinalizedEvents(for generation: CaptureGeneration) async {
+        while let event = generation.ingress.relay.next() {
+            switch event {
+            case let .chunk(url, track, sessionStartMs):
+                await registerChunk(url, track: track, sessionStartMs: sessionStartMs, generation: generation)
+            case let .failure(message):
+                // This event must be acknowledged before its terminal teardown
+                // awaits `drain()`. Otherwise teardown waits for this consumer
+                // to acknowledge the very event it is processing.
+                let shouldContinue = generation.ingress.relay.acknowledgeOne()
+                beginCaptureFailure(message, generation: generation)
+                if !shouldContinue { return }
+                continue
             }
-            isRegisteringChunk = false
-            let waiters = chunkDrainWaiters
-            chunkDrainWaiters.removeAll()
-            waiters.forEach { $0.resume() }
+            if !generation.ingress.relay.acknowledgeOne() { return }
         }
     }
 
-    private func registerChunk(_ url: URL, track: SourceTrack, sessionStartMs: Int64?) async {
-        guard let store else { return }
+    private func registerChunk(_ url: URL, track: SourceTrack, sessionStartMs: Int64?, generation: CaptureGeneration) async {
         do {
-            let directory = await store.sessionDirectory
+            let directory = await generation.store.sessionDirectory
             let relative = String(url.path.dropFirst(directory.path.count + 1))
             let audioFile = try AVAudioFile(forReading: url)
             let sampleRate = audioFile.processingFormat.sampleRate
@@ -952,44 +1243,93 @@ final class AppModel: ObservableObject {
                 frameCount: frameCount,
                 checksum: try Self.sha256(url)
             )
-            let inferredStart = sessionStartMs ?? max(0, elapsedMs - durationMs)
-            session = try await store.updateSession { value in
+            let inferredStart = sessionStartMs ?? max(0, authoritativeElapsedMs - durationMs)
+            let updated = try await generation.store.updateSession { value in
                 var registered = span
                 let previousEnd = value.tracks.filter { $0.trackID == trackID }.map { $0.sessionStartMs + $0.durationMs }.max() ?? inferredStart
                 registered.sessionStartMs = max(previousEnd, inferredStart)
                 value.tracks.append(registered)
             }
-            await replay?.update(spans: session?.tracks ?? [], liveHeadMs: elapsedMs)
-        } catch { await handleCaptureFailure(error) }
-    }
-
-    private var chunkDrainWaiters: [CheckedContinuation<Void, Never>] = []
-
-    private func waitForPendingChunks() async {
-        guard isRegisteringChunk || !pendingChunks.isEmpty else { return }
-        await withCheckedContinuation { chunkDrainWaiters.append($0) }
-    }
-
-    private func handleCaptureFailure(_ error: Error) async {
-        notice = "오디오 저장 중 문제가 발생했습니다: \(error.localizedDescription)"
-        let firstFailure = captureFailureMessage == nil
-        captureFailureMessage = error.localizedDescription
-        if firstFailure, let store {
-            let failureMs = elapsedMs
-            session = try? await store.updateSession { value in
-                value.captureStatus = .interrupted
-                value.gaps.append(Gap(startMs: failureMs, reason: .unknown))
-            }
+            guard activeGeneration === generation else { return }
+            session = updated
+            await replay?.update(spans: updated.tracks, liveHeadMs: authoritativeElapsedMs)
+        } catch {
+            // Keep every terminal failure on the relay. The current chunk can
+            // then be acknowledged before any failure teardown calls drain.
+            generation.ingress.submit(.failure(error.localizedDescription))
         }
-        guard captureActive else { return }
+    }
+
+    private func beginCaptureFailure(_ message: String, generation: CaptureGeneration) {
+        // A stale event still finishes its own durable session, but cannot
+        // affect the visible generation, meter, recorder references, or store.
+        guard activeGeneration === generation else {
+            Task { @MainActor in
+                do {
+                    _ = try await terminalCoordinator.persistInterrupted(generation.store)
+                } catch {
+                    terminalCoordinator.block(generationID: generation.id)
+                    terminalPersistenceBlocked = terminalCoordinator.terminalPersistenceBlocked
+                    terminalOwner = .persistenceBlocked(generation)
+                    let visible = "이전 녹음의 중단 상태를 저장하지 못했습니다: \(error.localizedDescription)"
+                    if showResults { resultNotice = visible } else { notice = visible }
+                }
+            }
+            return
+        }
+        notice = "오디오 저장 중 문제가 발생했습니다: \(message)"
+        captureFailureMessage = message
+        // A source failure during suspended start marks terminal intent now.
+        // Start's catch remains the one cleanup owner after it resumes.
+        if let owner = terminalOwner, owner.owns(generation) {
+            if case .starting = owner { terminalOwner = .failing(generation) }
+            return
+        }
+        // Busy is set before the first suspension, keeping a new start from
+        // replacing this generation while its writers and FIFO still drain.
+        terminalOwner = .failing(generation)
+        isBusy = true
         captureActive = false
         recordingIndicator.hide()
         timer?.invalidate()
         timer = nil
-        microphone?.stop()
+        Task { @MainActor [weak self] in
+            await self?.finishCaptureFailure(generation: generation)
+        }
+    }
+
+    private func finishCaptureFailure(generation: CaptureGeneration) async {
+        guard activeGeneration === generation, terminalOwner?.isFailure(for: generation) == true else { return }
+        let failedMicrophone = microphone
+        let failedSystemAudio = systemAudio
         microphone = nil
-        try? await systemAudio?.stop()
         systemAudio = nil
+        failedMicrophone?.stop()
+        var quiescedAt = Date()
+        do {
+            if let failedSystemAudio { quiescedAt = try await failedSystemAudio.stopAndWaitForQuiescence() }
+        } catch {
+            if let terminal = error as? SystemAudioRecorderStopError { quiescedAt = terminal.captureQuiescedAt }
+        }
+        await generation.ingress.relay.drain()
+        freezeCapturePresentation(at: quiescedAt)
+        let failureMs = authoritativeElapsedMs
+        do {
+            session = try await terminalCoordinator.persistInterrupted(generation.store, failureMs: failureMs)
+        } catch {
+            terminalPersistenceBlocked = terminalCoordinator.terminalPersistenceBlocked
+            terminalOwner = .persistenceBlocked(generation)
+            notice = "오디오 오류 뒤 중단 상태를 저장하지 못했습니다: \(error.localizedDescription)"
+            resultNotice = "오디오 오류 뒤 중단 상태를 저장하지 못했습니다. 새 녹음은 차단되어 있습니다: \(error.localizedDescription)"
+        }
+        recordingPresentation.clearLiveLevels()
+        showResults = true
+        if activeGeneration === generation {
+            activeGeneration = nil
+            meterRelaySlot.set(nil)
+        }
+        if !terminalPersistenceBlocked { terminalOwner = nil; terminalCoordinator.release() }
+        isBusy = false
     }
 
     private func resetSessionPresentation() {
@@ -1007,7 +1347,7 @@ final class AppModel: ObservableObject {
     }
 
     var recordingDurationMs: Int64 {
-        session?.tracks.map { $0.sessionStartMs + $0.durationMs }.max() ?? elapsedMs
+        session?.tracks.map { $0.sessionStartMs + $0.durationMs }.max() ?? authoritativeElapsedMs
     }
 
     var recordingLevelIsLow: Bool {
@@ -1016,30 +1356,14 @@ final class AppModel: ObservableObject {
     }
 
     private var expectedRecordingPeakLevels: [Float] {
+        let snapshot = frozenCaptureMeterSnapshot ?? activeGeneration?.meter.snapshot() ?? CaptureMeterSnapshot(microphoneLevel: 0, systemAudioLevel: 0, microphonePeak: 0, systemAudioPeak: 0)
         guard let source = session?.inputSource else { return [] }
         switch source {
-        case .microphone: return [microphonePeakLevel]
-        case .systemAudio: return [systemAudioPeakLevel]
-        case .microphoneAndSystem: return [microphonePeakLevel, systemAudioPeakLevel]
+        case .microphone: return [snapshot.microphonePeak]
+        case .systemAudio: return [snapshot.systemAudioPeak]
+        case .microphoneAndSystem: return [snapshot.microphonePeak, snapshot.systemAudioPeak]
         case .importedFile: return []
         }
-    }
-
-    private func resetRecordingLevels() {
-        microphoneLevel = 0
-        systemAudioLevel = 0
-        microphonePeakLevel = 0
-        systemAudioPeakLevel = 0
-    }
-
-    private func updateMicrophoneLevel(_ value: Float) {
-        microphoneLevel = max(value, microphoneLevel * 0.72)
-        microphonePeakLevel = max(microphonePeakLevel, value)
-    }
-
-    private func updateSystemAudioLevel(_ value: Float) {
-        systemAudioLevel = max(value, systemAudioLevel * 0.72)
-        systemAudioPeakLevel = max(systemAudioPeakLevel, value)
     }
 
     private var selectedProviderConfiguration: ProviderConfiguration {
@@ -1126,12 +1450,36 @@ final class AppModel: ObservableObject {
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        let activityGate = presentationActivityGate
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self, activityGate] _ in
+            // Avoid creating a MainActor task at all while the application is
+            // inactive; activation publishes the current authoritative value.
+            guard activityGate.isActive else { return }
             Task { @MainActor in
-                guard let self, let began = self.recordingBeganAt else { return }
-                self.elapsedMs = Int64(Date().timeIntervalSince(began) * 1_000)
+                guard let self else { return }
+                self.recordingPresentation.publishElapsed(self.authoritativeElapsedMs)
             }
         }
+    }
+
+    private var authoritativeElapsedMs: Int64 {
+        guard let recordingBeganAt else { return frozenElapsedMs }
+        return max(0, Int64(Date().timeIntervalSince(recordingBeganAt) * 1_000))
+    }
+
+    private func freezeCapturePresentation(at captureQuiescedAt: Date = Date(), generation: CaptureGeneration? = nil) {
+        let elapsed = CaptureElapsedFreeze.milliseconds(
+            recordingBeganAt: recordingBeganAt,
+            captureQuiescedAt: captureQuiescedAt,
+            fallback: frozenElapsedMs
+        )
+        recordingBeganAt = nil
+        frozenElapsedMs = elapsed
+        let snapshot = (generation ?? activeGeneration)?.meter.snapshot()
+            ?? frozenCaptureMeterSnapshot
+            ?? CaptureMeterSnapshot(microphoneLevel: 0, systemAudioLevel: 0, microphonePeak: 0, systemAudioPeak: 0)
+        frozenCaptureMeterSnapshot = snapshot
+        recordingPresentation.freeze(snapshot, elapsedMs: elapsed)
     }
 
     private static func prepareInternalSessionsDirectory() -> URL? {

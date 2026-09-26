@@ -113,6 +113,25 @@ private struct RecordingView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
+                Divider()
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("녹음 품질")
+                        .font(.subheadline.weight(.medium))
+                    Picker("녹음 품질", selection: $model.recordingQualityProfile) {
+                        ForEach(RecordingQualityProfile.allCases, id: \.self) { profile in
+                            Text(profile.displayName).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(model.captureActive)
+
+                    Text(model.recordingQualityProfile.storageGuidance)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if model.requiresSystemAudio {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
@@ -260,56 +279,16 @@ private struct RecordingView: View {
     }
 
     private var recordingPanel: some View {
-        SectionCard(
+        RecordingLivePanel(
             title: model.title,
-            subtitle: model.purpose == .lecture ? "강의 녹음" : "회의 녹음",
-            systemImage: "record.circle.fill"
-        ) {
-            VStack(spacing: 24) {
-                Text(AppModel.clock(model.elapsedMs))
-                    .font(.system(size: 50, weight: .semibold, design: .monospaced))
-                    .accessibilityLabel("녹음 시간 \(AppModel.clock(model.elapsedMs))")
-
-                VStack(spacing: 12) {
-                    if model.requiresMicrophone {
-                        RecordingLevelMeter(label: "마이크", level: model.microphoneLevel)
-                    }
-                    if model.requiresSystemAudio {
-                        RecordingLevelMeter(label: "앱 소리", level: model.systemAudioLevel)
-                    }
-                }
-
-                if model.elapsedMs >= 3_000 && model.recordingLevelIsLow {
-                    Label("소리가 거의 감지되지 않습니다. 입력 장치와 음량을 확인하세요.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                }
-
-                VStack(spacing: 10) {
-                    Button(role: .destructive) {
-                        Task { await model.stopRecording() }
-                    } label: {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 27, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 74, height: 74)
-                            .background(.red, in: Circle())
-                            .shadow(color: .red.opacity(0.24), radius: 10, y: 4)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.isBusy)
-
-                    Text("녹음 종료")
-                        .font(.headline)
-                }
-
-                Text("저장된 오디오 조각 \(model.session?.tracks.count ?? 0)개")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-        }
+            purpose: model.purpose,
+            requiresMicrophone: model.requiresMicrophone,
+            requiresSystemAudio: model.requiresSystemAudio,
+            chunkCount: model.session?.tracks.count ?? 0,
+            isBusy: model.isBusy,
+            presentation: model.recordingPresentation,
+            stop: { Task { await model.stopRecording() } }
+        )
     }
 
     private var canStartRecording: Bool {
@@ -847,6 +826,61 @@ private struct SummaryItemsView: View {
                 }
             }
         }
+    }
+}
+
+private struct RecordingLivePanel: View {
+    let title: String
+    let purpose: SessionPurpose
+    let requiresMicrophone: Bool
+    let requiresSystemAudio: Bool
+    let chunkCount: Int
+    let isBusy: Bool
+    @ObservedObject var presentation: RecordingPresentationState
+    let stop: () -> Void
+
+    var body: some View {
+        SectionCard(title: title, subtitle: purpose == .lecture ? "강의 녹음" : "회의 녹음", systemImage: "record.circle.fill") {
+            VStack(spacing: 24) {
+                Text(AppModel.clock(presentation.elapsedMs))
+                    .font(.system(size: 50, weight: .semibold, design: .monospaced))
+                    .accessibilityLabel("녹음 시간 \(AppModel.clock(presentation.elapsedMs))")
+                VStack(spacing: 12) {
+                    if requiresMicrophone { RecordingLevelMeter(label: "마이크", level: presentation.microphoneLevel) }
+                    if requiresSystemAudio { RecordingLevelMeter(label: "앱 소리", level: presentation.systemAudioLevel) }
+                }
+                if presentation.elapsedMs >= 3_000 && hasLowPeak {
+                    Label("소리가 거의 감지되지 않습니다. 입력 장치와 음량을 확인하세요.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.orange)
+                }
+                VStack(spacing: 10) {
+                    Button(role: .destructive, action: stop) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 27, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 74, height: 74)
+                            .background(.red, in: Circle())
+                            .shadow(color: .red.opacity(0.24), radius: 10, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    Text("녹음 종료").font(.headline)
+                }
+                Text("저장된 오디오 조각 \(chunkCount)개")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var hasLowPeak: Bool {
+        let levels = [
+            requiresMicrophone ? presentation.microphonePeakLevel : nil,
+            requiresSystemAudio ? presentation.systemAudioPeakLevel : nil,
+        ].compactMap { $0 }
+        return !levels.isEmpty && levels.contains { $0 < 0.12 }
     }
 }
 

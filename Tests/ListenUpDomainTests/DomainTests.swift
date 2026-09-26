@@ -12,6 +12,22 @@ import Testing
     #expect(decoded.providerConfiguration.summaryLocation == .cloud)
 }
 
+@Test func recordingQualityProfilesExposeFixedEncodingTargets() {
+    #expect(RecordingQualityProfile.transcriptionOptimized.sampleRate == 24_000)
+    #expect(RecordingQualityProfile.transcriptionOptimized.maximumChannelCount == 1)
+    #expect(RecordingQualityProfile.transcriptionOptimized.bitRate == 96_000)
+    #expect(RecordingQualityProfile.highQuality.sampleRate == 48_000)
+    #expect(RecordingQualityProfile.highQuality.maximumChannelCount == 2)
+    #expect(RecordingQualityProfile.highQuality.bitRate == 192_000)
+}
+
+@Test func legacySessionWithoutRecordingQualityProfileDecodesAsHighQuality() throws {
+    let legacyJSON = #"{"schemaVersion":1,"id":"00000000-0000-0000-0000-000000000000","title":"legacy","purpose":"meeting","inputSource":"microphone","createdAt":0,"timeZoneIdentifier":"UTC","captureStatus":"stopped","processingStatus":"notStarted","revision":0,"lastJournalSequence":0,"tracks":[],"gaps":[],"context":{"languages":["ko"],"keywords":[],"notes":""},"activeTranscriptRevisionID":null,"activeAnnotationRevisionID":null,"activeSummaryRevisionID":null,"summaryStale":false,"providerConfiguration":{"sttModelID":"gpt-transcribe","sttRevision":"openai-api","summaryModelID":"gpt-5.6-luna","summaryRevision":"openai-api","sttLocation":"cloud","summaryLocation":"cloud"}}"#
+    let session = try JSONDecoder().decode(Session.self, from: Data(legacyJSON.utf8))
+    #expect(session.recordingQualityProfile == nil)
+    #expect(session.effectiveRecordingQualityProfile == .highQuality)
+}
+
 @Test func rejectsPathTraversal() {
     let span = AudioSpan(trackID: "system", relativePath: "../escape.caf", durationMs: 1_000, sessionStartMs: 0, sampleRate: 48_000, frameCount: 48_000, checksum: "abc")
     let session = Session(title: "test", purpose: .meeting, inputSource: .systemAudio, tracks: [span])

@@ -31,6 +31,7 @@ let package = Package(
         .testTarget(name: "ListenUpDomainTests", dependencies: ["ListenUpDomain"]),
         .testTarget(name: "ListenUpStorageTests", dependencies: ["ListenUpStorage", "ListenUpDomain"]),
         .testTarget(name: "ListenUpAudioTests", dependencies: ["ListenUpAudio", "ListenUpDomain"]),
+        .testTarget(name: "ListenUpAppTests", dependencies: ["ListenUpApp", "ListenUpAudio", "ListenUpStorage", "ListenUpDomain"]),
         .testTarget(name: "ListenUpAITests", dependencies: ["ListenUpAI", "ListenUpDomain"]),
         .testTarget(name: "ListenUpExportTests", dependencies: ["ListenUpExport", "ListenUpDomain"]),
     ]

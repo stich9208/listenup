@@ -14,6 +14,49 @@ public enum InputSource: String, Codable, CaseIterable, Sendable {
     case importedFile
 }
 
+/// The only storage-quality choices offered for newly captured audio.  The
+/// values deliberately describe the encoded file rather than presentation
+/// strings, so stored sessions remain portable across localized UI versions.
+public enum RecordingQualityProfile: String, Codable, CaseIterable, Sendable {
+    case transcriptionOptimized
+    case highQuality
+
+    public var sampleRate: Double {
+        switch self {
+        case .transcriptionOptimized: 24_000
+        case .highQuality: 48_000
+        }
+    }
+
+    public var maximumChannelCount: Int {
+        switch self {
+        case .transcriptionOptimized: 1
+        case .highQuality: 2
+        }
+    }
+
+    public var bitRate: Int {
+        switch self {
+        case .transcriptionOptimized: 96_000
+        case .highQuality: 192_000
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .transcriptionOptimized: "전사 최적화"
+        case .highQuality: "고음질"
+        }
+    }
+
+    public var storageGuidance: String {
+        switch self {
+        case .transcriptionOptimized: "24kHz 모노 AAC로 저장해 파일 크기를 줄입니다."
+        case .highQuality: "48kHz AAC로 저장해 원음의 세부를 더 보존합니다."
+        }
+    }
+}
+
 public enum CaptureStatus: String, Codable, Sendable {
     case idle, preparing, recording, paused, stopping, stopped, interrupted
 }
@@ -289,8 +332,21 @@ public struct Session: Codable, Equatable, Identifiable, Sendable {
     public var activeSummaryRevisionID: String?
     public var summaryStale: Bool
     public var providerConfiguration: ProviderConfiguration
+    /// Nil denotes a session written before quality profiles existed. Such
+    /// sessions retain their files and are interpreted as legacy high quality.
+    public var recordingQualityProfile: RecordingQualityProfile?
 
+    public var effectiveRecordingQualityProfile: RecordingQualityProfile {
+        recordingQualityProfile ?? .highQuality
+    }
+
+    /// Preserves the original public initializer for clients compiled against
+    /// earlier releases. New capture code uses the overload below.
     public init(id: UUID = UUID(), title: String, purpose: SessionPurpose, inputSource: InputSource, createdAt: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier, captureStatus: CaptureStatus = .idle, processingStatus: ProcessingStatus = .notStarted, revision: Int = 0, lastJournalSequence: Int64 = 0, tracks: [AudioSpan] = [], gaps: [Gap] = [], context: SessionContext = .init(), activeTranscriptRevisionID: String? = nil, activeAnnotationRevisionID: String? = nil, activeSummaryRevisionID: String? = nil, summaryStale: Bool = false, providerConfiguration: ProviderConfiguration = .init()) {
+        self.init(id: id, title: title, purpose: purpose, inputSource: inputSource, createdAt: createdAt, timeZoneIdentifier: timeZoneIdentifier, captureStatus: captureStatus, processingStatus: processingStatus, revision: revision, lastJournalSequence: lastJournalSequence, tracks: tracks, gaps: gaps, context: context, activeTranscriptRevisionID: activeTranscriptRevisionID, activeAnnotationRevisionID: activeAnnotationRevisionID, activeSummaryRevisionID: activeSummaryRevisionID, summaryStale: summaryStale, providerConfiguration: providerConfiguration, recordingQualityProfile: nil)
+    }
+
+    public init(id: UUID = UUID(), title: String, purpose: SessionPurpose, inputSource: InputSource, createdAt: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier, captureStatus: CaptureStatus = .idle, processingStatus: ProcessingStatus = .notStarted, revision: Int = 0, lastJournalSequence: Int64 = 0, tracks: [AudioSpan] = [], gaps: [Gap] = [], context: SessionContext = .init(), activeTranscriptRevisionID: String? = nil, activeAnnotationRevisionID: String? = nil, activeSummaryRevisionID: String? = nil, summaryStale: Bool = false, providerConfiguration: ProviderConfiguration = .init(), recordingQualityProfile: RecordingQualityProfile?) {
         self.schemaVersion = Self.currentSchemaVersion; self.id = id; self.title = title; self.purpose = purpose
         self.inputSource = inputSource; self.createdAt = createdAt; self.timeZoneIdentifier = timeZoneIdentifier
         self.captureStatus = captureStatus; self.processingStatus = processingStatus; self.revision = revision
@@ -298,6 +354,7 @@ public struct Session: Codable, Equatable, Identifiable, Sendable {
         self.activeTranscriptRevisionID = activeTranscriptRevisionID; self.activeAnnotationRevisionID = activeAnnotationRevisionID
         self.activeSummaryRevisionID = activeSummaryRevisionID; self.summaryStale = summaryStale
         self.providerConfiguration = providerConfiguration
+        self.recordingQualityProfile = recordingQualityProfile
     }
 }
 
