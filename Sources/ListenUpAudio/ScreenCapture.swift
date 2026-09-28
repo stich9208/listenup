@@ -171,5 +171,35 @@ private final class ScreenCaptureKitStreamInstance: NSObject, ScreenCaptureStrea
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) { guard type == .audio else { return }; onSampleBuffer(sampleBuffer) }
     func stream(_ stream: SCStream, didStopWithError error: any Error) { onTerminalError(error) }
 }
-private final class ScreenCaptureTerminalBarrier: @unchecked Sendable { private let lock = NSLock(); private var result: Result<Void, Error>?; private var waiters: [CheckedContinuation<Result<Void, Error>, Never>] = []; func wait() async throws { let result = await withCheckedContinuation { continuation in lock.withLock { if let result { continuation.resume(returning: result) } else { waiters.append(continuation) } } }; try result.get() }; func finish(_ result: Result<Void, Error>) { let waiters = lock.withLock { () -> [CheckedContinuation<Result<Void, Error>, Never>] in guard self.result == nil else { return [] }; self.result = result; let values = self.waiters; self.waiters.removeAll(); return values }; waiters.forEach { $0.resume(returning: result) } } }
+private final class ScreenCaptureTerminalBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Void, Error>?
+    private var waiters: [CheckedContinuation<Result<Void, Error>, Never>] = []
+
+    func wait() async throws {
+        let result: Result<Void, Error> = await withCheckedContinuation {
+            (continuation: CheckedContinuation<Result<Void, Error>, Never>) in
+            lock.withLock {
+                if let storedResult = self.result {
+                    continuation.resume(returning: storedResult)
+                } else {
+                    self.waiters.append(continuation)
+                }
+            }
+        }
+        try result.get()
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        let waiters = lock.withLock {
+            () -> [CheckedContinuation<Result<Void, Error>, Never>] in
+            guard self.result == nil else { return [] }
+            self.result = result
+            let values = self.waiters
+            self.waiters.removeAll()
+            return values
+        }
+        waiters.forEach { $0.resume(returning: result) }
+    }
+}
 enum SampleQueueQuiescer { static func drain(_ queue: DispatchQueue) async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } } }
