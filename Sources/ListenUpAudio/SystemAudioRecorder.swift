@@ -221,7 +221,7 @@ public final class SystemAudioRecorder: @unchecked Sendable {
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: profile.sampleRate,
             AVNumberOfChannelsKey: channelCount,
-            AVEncoderBitRatePerChannelKey: NSNumber(value: UInt32(profile.bitRate / channelCount)),
+            AVEncoderBitRateKey: profile.bitRate,
         ]
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
         input.expectsMediaDataInRealTime = true

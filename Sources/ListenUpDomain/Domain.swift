@@ -37,7 +37,9 @@ public enum RecordingQualityProfile: String, Codable, CaseIterable, Sendable {
 
     public var bitRate: Int {
         switch self {
-        case .transcriptionOptimized: 96_000
+        // 96 kbps is rejected by the AAC encoder when converting 48 kHz
+        // system audio to 24 kHz mono. Keep both capture paths compatible.
+        case .transcriptionOptimized: 64_000
         case .highQuality: 192_000
         }
     }

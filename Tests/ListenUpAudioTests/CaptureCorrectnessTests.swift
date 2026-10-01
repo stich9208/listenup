@@ -46,6 +46,44 @@ final class CaptureCorrectnessTests: XCTestCase {
             XCTAssertLessThanOrEqual(abs(error.captureQuiescedAt.timeIntervalSinceNow), 1)
         }
     }
+    func testSystemAudioEncodesStereo48kForEachProfile() async throws {
+        for profile in RecordingQualityProfile.allCases {
+            let directory = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let provider = ControllableProvider()
+            let recorder = SystemAudioRecorder(sampleProvider: provider)
+            let errors = LockedBox<[String]>([])
+            let chunks = LockedBox<[URL]>([])
+            recorder.onError = { error in errors.mutate { $0.append(String(describing: error)) } }
+            recorder.onFinalizedChunk = { url in chunks.mutate { $0.append(url) } }
+            try await recorder.start(directory: directory, profile: profile)
+            let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false))
+            let pcm = try pcmBuffer(format: format, frameCount: 480)
+            for channel in 0..<2 {
+                for frame in 0..<480 { pcm.floatChannelData![channel][frame] = Float(sin(Double(frame) * 0.1)) * 0.2 }
+            }
+            var description: CMAudioFormatDescription?
+            XCTAssertEqual(CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: format.streamDescription, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &description), noErr)
+            for index in 0..<100 {
+                var sample: CMSampleBuffer?
+                XCTAssertEqual(CMSampleBufferCreate(allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false, makeDataReadyCallback: nil, refcon: nil, formatDescription: description, sampleCount: 480, sampleTimingEntryCount: 1, sampleTimingArray: [CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 48_000), presentationTimeStamp: CMTime(value: Int64(index * 480), timescale: 48_000), decodeTimeStamp: .invalid)], sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sample), noErr)
+                let buffer = try XCTUnwrap(sample)
+                XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(buffer, blockBufferAllocator: kCFAllocatorDefault, blockBufferMemoryAllocator: kCFAllocatorDefault, flags: 0, bufferList: pcm.audioBufferList), noErr)
+                XCTAssertEqual(CMSampleBufferSetDataReady(buffer), noErr)
+                provider.emit(buffer)
+                // Pace as capture does, allowing the asynchronous encoder to consume input.
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try await recorder.stop()
+            XCTAssertTrue(errors.value.isEmpty, "\(profile): \(errors.value)")
+            let url = try XCTUnwrap(chunks.value.first)
+            let file = try AVAudioFile(forReading: url)
+            XCTAssertEqual(file.processingFormat.sampleRate, profile.sampleRate, accuracy: 1)
+            XCTAssertEqual(file.processingFormat.channelCount, AVAudioChannelCount(profile.maximumChannelCount))
+            XCTAssertEqual(Double(file.length) / file.processingFormat.sampleRate, 1, accuracy: 0.1)
+        }
+    }
+
     func testPartialPathCreatesDecodableM4AForEachProfile() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -249,6 +287,8 @@ private final class ControllableProvider: SystemAudioSampleProvider, @unchecked 
     private let blockStart: Bool
     private var enteredStart = false
     private var startContinuation: CheckedContinuation<Void, Never>?
+    private var sampleHandler: (@Sendable (CMSampleBuffer) -> Void)?
+    func emit(_ sample: CMSampleBuffer) { sampleHandler?(sample) }
     var failStop = false
     var onError: (@Sendable (Error) -> Void)?
 
@@ -257,6 +297,7 @@ private final class ControllableProvider: SystemAudioSampleProvider, @unchecked 
     func availableApplications() async throws -> [CaptureApplication] { [] }
 
     func start(application: CaptureApplication?, onSampleBuffer: @escaping @Sendable (CMSampleBuffer) -> Void) async throws {
+        sampleHandler = onSampleBuffer
         guard blockStart else { return }
         await withCheckedContinuation { continuation in
             lock.withLock {

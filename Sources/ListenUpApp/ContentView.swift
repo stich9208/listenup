@@ -56,10 +56,10 @@ private struct RecordingView: View {
 
     private var pageHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(model.isRecording ? "녹음 중" : "새 녹음")
+            Text(model.isRecording ? (model.recordingPaused ? "녹음 일시정지" : "녹음 중") : "새 녹음")
                 .font(.system(size: 32, weight: .bold))
             Text(model.isRecording
-                 ? "입력 레벨을 확인하며 녹음하세요. 다른 앱을 사용해도 녹음은 계속됩니다."
+                 ? (model.recordingPaused ? "재개를 누르면 같은 녹음에 이어서 저장합니다." : "입력 레벨을 확인하며 녹음하세요. 다른 앱을 사용해도 녹음은 계속됩니다.")
                  : "강의나 회의를 녹음한 뒤 전체 전사와 목적에 맞는 요약을 만듭니다.")
                 .font(.body)
                 .foregroundStyle(.secondary)
@@ -287,6 +287,8 @@ private struct RecordingView: View {
             chunkCount: model.session?.tracks.count ?? 0,
             isBusy: model.isBusy,
             presentation: model.recordingPresentation,
+            isPaused: model.recordingPaused,
+            togglePause: { Task { await model.toggleRecordingPause() } },
             stop: { Task { await model.stopRecording() } }
         )
     }
@@ -454,9 +456,9 @@ private struct ResultView: View {
 
     private func recordingReadyPanel(_ session: Session) -> some View {
         SectionCard(
-            title: "녹음이 저장되었습니다",
-            subtitle: "녹음을 확인한 뒤 전사와 요약을 시작하세요.",
-            systemImage: "checkmark.circle.fill"
+            title: session.captureStatus == .interrupted ? "녹음이 중단되었습니다" : "녹음이 저장되었습니다",
+            subtitle: session.tracks.isEmpty ? "저장된 오디오가 없습니다. 다시 녹음해 주세요." : "녹음을 확인한 뒤 전사와 요약을 시작하세요.",
+            systemImage: session.captureStatus == .interrupted ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 18) {
@@ -472,17 +474,25 @@ private struct ResultView: View {
                     }
                 }
 
-                NoticeBanner(
-                    message: model.recordingLevelIsLow
-                        ? "입력 소리가 매우 작았습니다. 녹음을 확인하고 필요하면 입력 장치나 음량을 조정한 뒤 다시 녹음하세요."
-                        : "녹음이 앱 내부에 안전하게 보관되었습니다. 파일은 원할 때만 내보낼 수 있습니다.",
-                    kind: model.recordingLevelIsLow ? .warning : .information
-                )
+                if session.captureStatus == .interrupted {
+                    NoticeBanner(
+                        message: model.resultNotice.isEmpty ? "녹음 중 오류가 발생했습니다. 저장된 오디오를 확인하거나 다시 녹음해 주세요." : model.resultNotice,
+                        kind: .warning
+                    )
+                } else {
+                    NoticeBanner(
+                        message: model.recordingLevelIsLow
+                            ? "입력 소리가 매우 작았습니다. 녹음을 확인하고 필요하면 입력 장치나 음량을 조정한 뒤 다시 녹음하세요."
+                            : "녹음이 앱 내부에 안전하게 보관되었습니다. 파일은 원할 때만 내보낼 수 있습니다.",
+                        kind: model.recordingLevelIsLow ? .warning : .information
+                    )
+                }
 
                 HStack(spacing: 10) {
                     Button(model.previewPlaying ? "재생 중지" : "녹음 확인", systemImage: model.previewPlaying ? "stop.fill" : "play.fill") {
                         Task { await model.toggleRecordingPreview() }
                     }
+                    .disabled(session.tracks.isEmpty)
                     if session.inputSource != .importedFile {
                         Button("녹음 다시하기", systemImage: "arrow.counterclockwise.circle") {
                             Task { await model.restartRecording() }
@@ -516,7 +526,7 @@ private struct ResultView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(model.isBusy)
+                    .disabled(model.isBusy || session.tracks.isEmpty)
                 } else {
                     SettingsLink {
                         Label("API 키 설정", systemImage: "key.fill")
@@ -620,10 +630,17 @@ private struct ResultView: View {
             transcriptEditor
                 .tabItem { Label("전체 전사", systemImage: "text.alignleft") }
                 .tag(ResultTab.transcript)
-            ScrollView {
-                summaryContent
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
+            Group {
+                if model.summary == nil {
+                    summaryContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                } else {
+                    ScrollView {
+                        summaryContent
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(24)
+                    }
+                }
             }
             .tabItem { Label("요약", systemImage: "list.bullet.rectangle") }
             .tag(ResultTab.summary)
@@ -837,6 +854,8 @@ private struct RecordingLivePanel: View {
     let chunkCount: Int
     let isBusy: Bool
     @ObservedObject var presentation: RecordingPresentationState
+    let isPaused: Bool
+    let togglePause: () -> Void
     let stop: () -> Void
 
     var body: some View {
@@ -849,23 +868,39 @@ private struct RecordingLivePanel: View {
                     if requiresMicrophone { RecordingLevelMeter(label: "마이크", level: presentation.microphoneLevel) }
                     if requiresSystemAudio { RecordingLevelMeter(label: "앱 소리", level: presentation.systemAudioLevel) }
                 }
-                if presentation.elapsedMs >= 3_000 && hasLowPeak {
+                if !isPaused && presentation.elapsedMs >= 3_000 && hasLowPeak {
                     Label("소리가 거의 감지되지 않습니다. 입력 장치와 음량을 확인하세요.", systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.orange)
                 }
-                VStack(spacing: 10) {
-                    Button(role: .destructive, action: stop) {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 27, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 74, height: 74)
-                            .background(.red, in: Circle())
-                            .shadow(color: .red.opacity(0.24), radius: 10, y: 4)
+                HStack(alignment: .top, spacing: 36) {
+                    VStack(spacing: 10) {
+                        Button(action: togglePause) {
+                            Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                                .font(.system(size: 27, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 74, height: 74)
+                                .background(isPaused ? Color.accentColor : .orange, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isBusy)
+                        .accessibilityLabel(isPaused ? "녹음 재개" : "녹음 일시정지")
+                        Text(isPaused ? "녹음 재개" : "일시정지").font(.headline)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isBusy)
-                    Text("녹음 종료").font(.headline)
+                    VStack(spacing: 10) {
+                        Button(role: .destructive, action: stop) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 27, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 74, height: 74)
+                                .background(.red, in: Circle())
+                                .shadow(color: .red.opacity(0.24), radius: 10, y: 4)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isBusy)
+                        .accessibilityLabel("녹음 종료")
+                        Text("녹음 종료").font(.headline)
+                    }
                 }
                 Text("저장된 오디오 조각 \(chunkCount)개")
                     .font(.caption)

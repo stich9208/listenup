@@ -15,7 +15,7 @@ import Testing
 @Test func recordingQualityProfilesExposeFixedEncodingTargets() {
     #expect(RecordingQualityProfile.transcriptionOptimized.sampleRate == 24_000)
     #expect(RecordingQualityProfile.transcriptionOptimized.maximumChannelCount == 1)
-    #expect(RecordingQualityProfile.transcriptionOptimized.bitRate == 96_000)
+    #expect(RecordingQualityProfile.transcriptionOptimized.bitRate == 64_000)
     #expect(RecordingQualityProfile.highQuality.sampleRate == 48_000)
     #expect(RecordingQualityProfile.highQuality.maximumChannelCount == 2)
     #expect(RecordingQualityProfile.highQuality.bitRate == 192_000)
