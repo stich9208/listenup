@@ -25,6 +25,7 @@ final class AppModelPauseTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(model.recordingPresentation.elapsedMs, pausedTime)
         XCTAssertEqual(model.recordingPresentation.systemAudioLevel, 0)
+        let resumeRequestedAt = Date()
         await model.resumeRecording()
         XCTAssertFalse(model.recordingPaused)
         XCTAssertEqual(model.session?.id, sessionID)
@@ -38,7 +39,12 @@ final class AppModelPauseTests: XCTestCase {
         let spans = try XCTUnwrap(model.session?.tracks)
         XCTAssertNotEqual(spans[0].relativePath, spans[1].relativePath)
         XCTAssertGreaterThanOrEqual(spans[1].sessionStartMs, spans[0].sessionStartMs + spans[0].durationMs)
-        XCTAssertLessThan(model.recordingPresentation.elapsedMs - pausedTime, 300, "paused wall time must not enter the resumed timeline")
+        // Encoding and durable writes can take longer on a hosted runner.
+        // Bound recorded time by the actual resume-to-stop interval instead
+        // of assuming the resumed segment always completes within 300 ms.
+        let resumeToStopWallMs = Int64((Date().timeIntervalSince(resumeRequestedAt) * 1_000).rounded(.up))
+        XCTAssertLessThanOrEqual(model.recordingPresentation.elapsedMs - pausedTime, resumeToStopWallMs,
+                                 "recorded time must fit inside the resumed wall-clock interval")
         XCTAssertEqual(fixture.provider.stopCount, 2)
     }
 
